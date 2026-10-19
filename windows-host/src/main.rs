@@ -277,17 +277,40 @@ async fn run_control_socket(api_base: &str, session_id: &str, host_secret: &str)
     }
     println!("Remote-control channel authenticated. Waiting for iPhone commands. Press Ctrl+C to stop Host.");
 
-    let (input_tx, input_rx) = mpsc::channel::<ControlCommand>();
-    let input_thread = tokio::task::spawn_blocking(move || input_worker_loop(input_rx));
+    let (input_tx, input_rx) = mpsc::channel::<(String, ControlCommand)>();
+    let (input_event_tx, mut input_event_rx) = tokio::sync::mpsc::unbounded_channel::<InputWorkerEvent>();
+    let input_thread = tokio::task::spawn_blocking(move || input_worker_loop(input_rx, input_event_tx));
     let (mut sink, mut stream) = socket.split();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
     heartbeat.tick().await;
+    let mut input_status: Option<(bool, String)> = None;
+    let mut input_events_open = true;
 
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
                 sink.send(Message::Text(json!({"type":"ping"}).to_string().into())).await
                     .context("send control heartbeat")?;
+            }
+            input_event = input_event_rx.recv(), if input_events_open => {
+                if let Some(input_event) = input_event {
+                    match input_event {
+                        InputWorkerEvent::Ready { ok, message } => {
+                            input_status = Some((ok, message.clone()));
+                            println!("Windows input API ready={ok}: {message}");
+                            sink.send(Message::Text(json!({"type":"inputStatus","ok":ok,"message":message}).to_string().into())).await
+                                .context("send input status")?;
+                        }
+                        InputWorkerEvent::CommandResult { id, ok, message } => {
+                            if !ok { eprintln!("Windows input command failed: {message}"); }
+                            sink.send(Message::Text(json!({"type":"ack","id":id,"ok":ok,"message":message}).to_string().into())).await
+                                .context("send control acknowledgement")?;
+                        }
+                    }
+                } else {
+                    // Do not leave a closed channel enabled in select!: that would busy-loop.
+                    input_events_open = false;
+                }
             }
             incoming = stream.next() => {
                 let Some(incoming) = incoming else { break; };
@@ -299,8 +322,15 @@ async fn run_control_socket(api_base: &str, session_id: &str, host_secret: &str)
                         };
                         let message_type = value.get("type").and_then(Value::as_str).unwrap_or("");
                         if message_type == "pong" { continue; }
+                        if message_type == "clientConnected" {
+                            if let Some((ok, message)) = input_status.as_ref() {
+                                sink.send(Message::Text(json!({"type":"inputStatus","ok":ok,"message":message}).to_string().into())).await
+                                    .context("resend input status to newly connected client")?;
+                            }
+                            continue;
+                        }
                         if message_type == "clientDisconnected" {
-                            let _ = input_tx.send(ControlCommand::ReleaseAll);
+                            let _ = input_tx.send((String::new(), ControlCommand::ReleaseAll));
                             println!("iPhone controller disconnected; released held mouse/keyboard inputs.");
                             continue;
                         }
@@ -312,11 +342,8 @@ async fn run_control_socket(api_base: &str, session_id: &str, host_secret: &str)
                             .and_then(validate_command);
                         match parsed {
                             Ok(command) => {
-                                if input_tx.send(command).is_ok() {
-                                    sink.send(Message::Text(json!({"type":"ack","id":id,"ok":true,"message":"queued"}).to_string().into())).await
-                                        .context("send control acknowledgement")?;
-                                } else {
-                                    sink.send(Message::Text(json!({"type":"ack","id":id,"ok":false,"message":"input worker unavailable"}).to_string().into())).await
+                                if input_tx.send((id.clone(), command)).is_err() {
+                                    sink.send(Message::Text(json!({"type":"ack","id":id,"ok":false,"message":"Windows input worker unavailable. Check Host console."}).to_string().into())).await
                                         .context("send control acknowledgement")?;
                                 }
                             }
@@ -334,27 +361,47 @@ async fn run_control_socket(api_base: &str, session_id: &str, host_secret: &str)
         }
     }
 
-    let _ = input_tx.send(ControlCommand::ReleaseAll);
+    let _ = input_tx.send((String::new(), ControlCommand::ReleaseAll));
     drop(input_tx);
     let _ = input_thread.await;
     println!("Control WebSocket closed; released held mouse/keyboard inputs.");
     Ok(())
 }
 
+enum InputWorkerEvent {
+    Ready { ok: bool, message: String },
+    CommandResult { id: String, ok: bool, message: String },
+}
+
 #[cfg(windows)]
-fn input_worker_loop(receiver: Receiver<ControlCommand>) {
-    use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+fn input_worker_loop(
+    receiver: Receiver<(String, ControlCommand)>,
+    events: tokio::sync::mpsc::UnboundedSender<InputWorkerEvent>,
+) {
+    use enigo::{Direction, Enigo, Keyboard, Mouse, Settings};
     use std::collections::HashSet;
 
     let mut enigo = match Enigo::new(&Settings::default()) {
         Ok(value) => value,
-        Err(error) => { eprintln!("Could not initialize Windows input injection: {error}"); return; }
+        Err(error) => {
+            let message = format!("Could not initialize Windows input injection: {error}");
+            eprintln!("{message}");
+            let _ = events.send(InputWorkerEvent::Ready { ok: false, message });
+            return;
+        }
     };
+    let _ = events.send(InputWorkerEvent::Ready { ok: true, message: "Enigo initialized on Windows".to_string() });
     let mut held_keys: HashSet<String> = HashSet::new();
     let mut held_buttons: HashSet<String> = HashSet::new();
-    while let Ok(command) = receiver.recv() {
-        if let Err(error) = apply_input_command(&mut enigo, command, &mut held_keys, &mut held_buttons) {
-            eprintln!("Input command failed: {error:#}");
+    while let Ok((id, command)) = receiver.recv() {
+        let result = apply_input_command(&mut enigo, command, &mut held_keys, &mut held_buttons);
+        match result {
+            Ok(()) => { let _ = events.send(InputWorkerEvent::CommandResult { id, ok: true, message: "executed".to_string() }); }
+            Err(error) => {
+                let message = error.to_string();
+                eprintln!("Input command failed: {message}");
+                let _ = events.send(InputWorkerEvent::CommandResult { id, ok: false, message });
+            }
         }
     }
     for button in held_buttons.drain() {
@@ -366,8 +413,14 @@ fn input_worker_loop(receiver: Receiver<ControlCommand>) {
 }
 
 #[cfg(not(windows))]
-fn input_worker_loop(_receiver: Receiver<ControlCommand>) {
-    eprintln!("Remote input injection is supported only on Windows in this build.");
+fn input_worker_loop(
+    _receiver: Receiver<(String, ControlCommand)>,
+    events: tokio::sync::mpsc::UnboundedSender<InputWorkerEvent>,
+) {
+    let _ = events.send(InputWorkerEvent::Ready {
+        ok: false,
+        message: "Remote input injection is supported only on Windows in this build.".to_string(),
+    });
 }
 
 #[cfg(windows)]

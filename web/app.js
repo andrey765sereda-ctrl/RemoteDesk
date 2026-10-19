@@ -20,13 +20,21 @@
   const textToType = $('#text-to-type');
   const toast = $('#toast');
   const streamUrlInput = $('#stream-url');
+  const streamFrame = $('#stream-frame');
+  const streamPlaceholder = $('#stream-placeholder');
+  const streamStatus = $('#stream-status');
+  const inputStatusDetail = $('#input-status-detail');
   let apiBase = DEFAULT_API_URL;
   let toastTimer = 0;
   let pairingInProgress = false;
   let controlSocket = null;
   let controlAuthenticated = false;
   let hostConnected = false;
+  let hostSocketConnected = false;
+  let inputReady = false;
+  let inputStatusReceived = false;
   let commandCounter = 0;
+  const commandKinds = new Map();
   let padPointerId = null;
   let padLastX = 0;
   let padLastY = 0;
@@ -156,6 +164,10 @@
       let authenticated = false;
       const ws = new WebSocket(makeWebSocketUrl());
       controlSocket = ws;
+      hostSocketConnected = false;
+      inputReady = false;
+      inputStatusReceived = false;
+      inputStatusDetail.textContent = 'Подключение WebSocket управления…';
       setControlReady(false, 'Открываем защищённый канал управления…');
       const timer = setTimeout(() => {
         if (!finished) { finished = true; try { ws.close(); } catch {} reject(new Error('Worker не подтвердил WebSocket за 15 секунд. Обнови Worker и проверь его логи.')); }
@@ -178,14 +190,33 @@
           if (!finished) { finished = true; clearTimeout(timer); resolve(); }
           setControlReady(false, 'Канал авторизован. Ожидаем Windows Host…');
         } else if (data.type === 'hostConnected') {
-          setControlReady(true, 'Управление подключено');
-          showToast('Канал управления готов.');
+          hostSocketConnected = true;
+          setControlReady(hostSocketConnected && inputReady, inputReady ? 'Управление подключено' : 'Host подключён; проверяем Windows input API…');
+          if (!inputStatusReceived) inputStatusDetail.textContent = 'Ожидаем подтверждение, что Windows может отправлять ввод…';
+        } else if (data.type === 'inputStatus') {
+          inputStatusReceived = true;
+          inputReady = data.ok === true;
+          inputStatusDetail.textContent = data.ok ? `Windows input API готов: ${data.message || 'OK'}` : `Windows input API недоступен: ${data.message || 'неизвестная ошибка'}`;
+          setControlReady(hostSocketConnected && inputReady, !hostSocketConnected ? 'Host не подключён' : (inputReady ? 'Управление подключено' : 'Ввод Windows не готов'));
+          if (!data.ok) showToast(`Не удалось инициализировать ввод Windows: ${data.message || 'ошибка'}`);
+          else if (hostSocketConnected) showToast('Управление подключено. Проверь курсор кнопкой ниже.');
         } else if (data.type === 'hostOffline' || data.type === 'hostDisconnected') {
+          hostSocketConnected = false;
+          inputReady = false;
+          inputStatusReceived = false;
+          inputStatusDetail.textContent = 'Host не подключён. Перезапусти RemoteDesk Host.';
           setControlReady(false, 'Host не подключён. Перезапусти RemoteDesk Host.');
         } else if (data.type === 'clientDisconnected') {
           showToast('Сессия управления прервана.');
-        } else if (data.type === 'ack' && data.ok === false) {
-          showToast(`Команда не выполнена: ${data.message || 'ошибка'}`);
+        } else if (data.type === 'ack') {
+          const kind = commandKinds.get(String(data.id || '')) || 'command';
+          commandKinds.delete(String(data.id || ''));
+          if (data.ok === false) {
+            inputStatusDetail.textContent = `Команда ${kind} не выполнена на Windows: ${data.message || 'ошибка'}`;
+            showToast(`Команда не выполнена: ${data.message || 'ошибка'}`);
+          } else if (kind !== 'move' || inputStatusDetail.textContent.startsWith('Тестовая команда отправлена')) {
+            inputStatusDetail.textContent = `Команда ${kind} выполнена на Windows.`;
+          }
         } else if (data.type === 'error') {
           if (!authenticated) fail(new Error(`Worker отклонил управление: ${data.message || 'auth error'}`));
           else showToast(`Ошибка управления: ${data.message || 'unknown'}`);
@@ -196,6 +227,9 @@
         if (!authenticated) fail(new Error('WebSocket закрылся до авторизации.'));
         controlSocket = null;
         controlAuthenticated = false;
+        hostSocketConnected = false;
+        inputReady = false;
+        inputStatusReceived = false;
         setControlReady(false, 'Канал управления закрыт');
       });
     });
@@ -204,6 +238,8 @@
   function sendCommand(command) {
     if (!controlSocket || controlSocket.readyState !== WebSocket.OPEN || !hostConnected) return false;
     const id = `${Date.now()}-${++commandCounter}`;
+    commandKinds.set(id, String(command.action || 'command'));
+    while (commandKinds.size > 160) commandKinds.delete(commandKinds.keys().next().value);
     try {
       controlSocket.send(JSON.stringify({ type: 'control', id, command }));
       return true;
@@ -263,6 +299,13 @@
   document.querySelectorAll('[data-click-button]').forEach(button => {
     button.addEventListener('click', () => sendCommand({ action: 'click', button: button.dataset.clickButton }));
   });
+  $('#test-control').addEventListener('click', () => {
+    if (sendCommand({ action: 'move', dx: 18, dy: 8 })) {
+      inputStatusDetail.textContent = 'Тестовая команда отправлена; ждём подтверждение от Windows…';
+    } else {
+      showToast('Управление ещё не готово. Сначала проверь статус Host и Windows input API.');
+    }
+  });
   document.querySelectorAll('[data-wheel]').forEach(button => {
     button.addEventListener('click', () => sendCommand({ action: 'wheel', deltaY: Number(button.dataset.wheel) }));
   });
@@ -307,21 +350,48 @@
     }
     controlSocket = null;
     controlAuthenticated = false;
+    hostSocketConnected = false;
+    inputReady = false;
+    inputStatusReceived = false;
     setControlReady(false, showStatus ? 'Управление отключено' : 'Канал управления закрыт');
     heldUi.clear();
     document.querySelectorAll('.held').forEach(element => element.classList.remove('held'));
   }
 
-  $('#stream-open').addEventListener('click', () => {
+  $('#stream-load').addEventListener('click', () => {
     let url;
     try { url = new URL(streamUrlInput.value.trim()); }
-    catch { showToast('Введи полный URL потока MediaMTX.'); return; }
-    if (!['http:', 'https:'].includes(url.protocol)) { showToast('Поддерживаются только HTTP/HTTPS URL.'); return; }
-    const link = document.createElement('a');
-    link.href = url.toString();
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    link.click();
+    catch { showToast('Введи полный HTTPS URL MediaMTX через Tailscale Serve.'); return; }
+    const localHttpAllowed = location.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname);
+    if (url.protocol !== 'https:' && !localHttpAllowed) {
+      showToast('GitHub Pages работает через HTTPS. Для встроенного видео используй HTTPS-адрес Tailscale Serve, а не локальный http://192.168…');
+      streamStatus.textContent = 'Для мобильного интернета требуется HTTPS-адрес Tailscale Serve.';
+      return;
+    }
+    if (url.username || url.password) { showToast('Не вставляй логин и пароль в URL видео.'); return; }
+    url.searchParams.set('autoplay', 'true');
+    url.searchParams.set('muted', 'true');
+    url.searchParams.set('playsInline', 'true');
+    url.searchParams.set('controls', 'true');
+    streamPlaceholder.hidden = true;
+    streamFrame.hidden = false;
+    streamFrame.src = url.toString();
+    $('#stream-load').disabled = true;
+    $('#stream-stop').disabled = false;
+    streamStatus.textContent = 'Загружаем встроенный плеер MediaMTX… Если видео не появится, проверь Tailscale и WebRTC UDP 8189.';
+  });
+  $('#stream-stop').addEventListener('click', () => {
+    streamFrame.src = 'about:blank';
+    streamFrame.hidden = true;
+    streamPlaceholder.hidden = false;
+    $('#stream-load').disabled = false;
+    $('#stream-stop').disabled = true;
+    streamStatus.textContent = 'Трансляция остановлена.';
+  });
+  streamFrame.addEventListener('load', () => {
+    if (!streamFrame.hidden && streamFrame.src && streamFrame.src !== 'about:blank') {
+      streamStatus.textContent = 'Страница MediaMTX загружена. Если изображение чёрное, проверь наличие потока и ICE-кандидат Tailscale IP.';
+    }
   });
 
   setControlReady(false, 'Сначала выполни сопряжение');

@@ -174,7 +174,7 @@ export default {
       return json({
         app: "RemoteDesk API",
         status: "ok",
-        version: "0.4.0",
+        version: "0.4.1",
         environment: env.APP_ENV ?? "unknown",
         capabilities: ["health-check", "temporary-pairing", "host-approval", "authenticated-control-websocket"],
         remoteControlEnabled: true,
@@ -591,6 +591,16 @@ export class PairingDirectory {
         return;
       }
       safeWebSocketSend(host, { type: "control", id: String(data.id ?? "").slice(0, 80), command });
+      return;
+    }
+
+    if (role === "host" && data.type === "inputStatus") {
+      const client = this.findControlPeer(sessionId, "client");
+      if (client) safeWebSocketSend(client, {
+        type: "inputStatus",
+        ok: data.ok === true,
+        message: typeof data.message === "string" ? data.message.slice(0, 200) : "",
+      });
       return;
     }
 

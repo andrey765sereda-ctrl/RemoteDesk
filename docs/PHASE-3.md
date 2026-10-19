@@ -79,4 +79,6 @@ This rule is only for the compiled Host executable on the Private profile. It do
 The sender targets a 100 ms start-to-start interval (up to 10 FPS) instead of waiting 700 ms after every frame. Actual FPS remains limited by synchronous desktop capture, JPEG encoding, network bandwidth, and reliable ordered DataChannel delivery. The Host prints five-second rolling stats: observed FPS, average JPEG frame size, capture time, and send time. If capture time is consistently high, the next improvement should be a native Windows Graphics Capture pipeline and video encoding rather than simply raising the target FPS.
 
 
-> Superseded by [PHASE-4.md](PHASE-4.md): the current build sends a native H.264 RTP video track instead of JPEG chunks over a DataChannel.
+## Stability note
+
+This release uses the WebRTC DataChannel JPEG preview that was successfully connected in the target environment. H.264/RTP is intentionally deferred until its sender, browser receiver, codec negotiation and keyframe handling are verified together on Windows and iPhone.
