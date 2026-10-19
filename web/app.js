@@ -60,17 +60,23 @@
   }
 
   async function postApi(path, body) {
-    const response = await fetch(`${apiBase}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify(body),
-      cache: 'no-store',
-      mode: 'cors',
-    });
+    let response;
+    try {
+      response = await fetch(`${apiBase}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify(body),
+        cache: 'no-store',
+        mode: 'cors',
+      });
+    } catch (cause) {
+      const detail = cause && cause.message ? cause.message : String(cause || 'network error');
+      throw new Error(`${path}: не удалось выполнить запрос (${detail}). Проверь интернет, адрес API и CORS.`);
+    }
     let data;
     try { data = await response.json(); } catch { data = {}; }
     if (!response.ok) {
-      const error = new Error(data.message || data.error || `HTTP ${response.status}`);
+      const error = new Error(`${path}: ${data.message || data.error || `HTTP ${response.status}`}`);
       error.status = response.status;
       throw error;
     }
@@ -172,9 +178,10 @@
       }
       setPairStatus('bad', 'Время ожидания истекло. Создай новый код на ПК.');
     } catch (error) {
-      setPairStatus('bad', `Подключение не удалось: ${error.message || 'ошибка сети'}`);
-      setScreenStatus('bad', 'Не удалось начать предпросмотр');
-      showToast(`Ошибка подключения: ${error.message || 'ошибка сети'}`);
+      const detail = error && error.message ? error.message : 'ошибка сети';
+      setPairStatus('bad', `Подключение не удалось: ${detail}`);
+      setScreenStatus('bad', `Не удалось начать предпросмотр: ${detail}`);
+      showToast(`Ошибка подключения: ${detail}`);
     } finally {
       pairingInProgress = false;
       if (pairButton.textContent !== 'Сопряжение подтверждено') {
@@ -196,12 +203,19 @@
         if (error) reject(error); else resolve();
       };
       const check = () => {
+        console.info('[RemoteDesk] ICE gathering state:', pc.iceGatheringState);
         if (pc.iceGatheringState === 'complete') finish();
       };
-      const timer = setTimeout(() => finish(new Error('Истекло время сбора ICE-кандидатов')), timeoutMs);
+      const timer = setTimeout(() => finish(new Error(`Истекло время сбора ICE-кандидатов; состояние=${pc.iceGatheringState}`)), timeoutMs);
       pc.addEventListener('icegatheringstatechange', check);
       check();
     });
+  }
+
+  function summarizeSdpCandidates(sdp) {
+    const lines = String(sdp || '').split(/\r?\n/).filter(line => line.startsWith('a=candidate:'));
+    const count = type => lines.filter(line => line.includes(` typ ${type}`)).length;
+    return `host=${count('host')}, srflx=${count('srflx')}, relay=${count('relay')}, total=${lines.length}`;
   }
 
   async function waitForHostOffer(sessionId, clientToken, timeoutMs = 120000) {
@@ -279,27 +293,59 @@
       channel.onmessage = event => consumeFrameChunk(event.data);
     };
 
+    let stage = 'получение WebRTC-предложения от Windows';
     try {
+      console.info('[RemoteDesk] Stage:', stage);
       const offer = await waitForHostOffer(sessionId, clientToken);
+      if (!offer || offer.type !== 'offer' || typeof offer.sdp !== 'string' || !offer.sdp.length) {
+        throw new Error('Worker вернул некорректное предложение: ожидался объект {type:"offer", sdp:"…"}');
+      }
+      console.info('[RemoteDesk] Offer received:', { type: offer.type, sdpLength: offer.sdp.length, candidates: summarizeSdpCandidates(offer.sdp) });
+
+      stage = 'применение WebRTC-предложения';
+      setScreenStatus('waiting', 'Применяем WebRTC-предложение…');
       await pc.setRemoteDescription(offer);
+
+      stage = 'создание WebRTC-ответа';
       const answer = await pc.createAnswer();
+      if (!answer || answer.type !== 'answer' || typeof answer.sdp !== 'string') {
+        throw new Error('Браузер не создал корректный WebRTC-ответ');
+      }
+
+      stage = 'установка локального WebRTC-ответа';
       await pc.setLocalDescription(answer);
+
+      stage = 'сбор ICE-кандидатов iPhone';
+      setScreenStatus('waiting', 'Собираем сетевые маршруты iPhone…');
       await waitForIceGatheringComplete(pc);
+      const localDescription = pc.localDescription;
+      if (!localDescription || localDescription.type !== 'answer' || !localDescription.sdp) {
+        throw new Error('Браузер не предоставил локальный SDP-ответ после ICE gathering');
+      }
+      console.info('[RemoteDesk] Local answer ready:', { type: localDescription.type, sdpLength: localDescription.sdp.length, candidates: summarizeSdpCandidates(localDescription.sdp) });
+
+      stage = 'отправка WebRTC-ответа через Cloudflare Worker';
+      setScreenStatus('waiting', 'Отправляем WebRTC-ответ на Windows…');
       await postApi('/api/rtc/client-answer', {
         sessionId,
         clientToken,
-        description: JSON.stringify(pc.localDescription),
+        description: JSON.stringify(localDescription),
       });
+      console.info('[RemoteDesk] WebRTC answer published to Worker');
+
+      stage = 'установка DataChannel';
       setScreenStatus('waiting', 'Ответ отправлен Windows. Устанавливаем канал изображения…');
       await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('Не получен первый кадр за 45 секунд')), 45000);
+        const timer = setTimeout(() => reject(new Error(`DataChannel/первый кадр не появился за 45 секунд; connection=${pc.connectionState}, ICE=${pc.iceConnectionState}, dataChannel=${activeDataChannel ? activeDataChannel.readyState : 'not-created'}`)), 45000);
         firstFrame.then(() => { clearTimeout(timer); resolve(); }, error => { clearTimeout(timer); reject(error); });
       });
       setScreenStatus('good', 'Экран подключён · режим только просмотра');
       showToast('Изображение Windows получено. Управление вводом пока выключено.');
     } catch (error) {
+      const detail = error && error.message ? error.message : String(error || 'неизвестная ошибка');
+      console.error('[RemoteDesk] Preview failed at stage:', stage, error);
       disconnectScreen(false);
-      throw error;
+      throw new Error(`${stage}: ${detail}`);
     }
   }
 
