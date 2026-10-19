@@ -13,13 +13,13 @@
     <header class="topbar">
       <div class="brand-mark" aria-hidden="true">RD</div>
       <div class="brand-copy"><h1>RemoteDesk</h1><p>Удалённый рабочий стол</p></div>
-      <span class="phase-tag">PHASE 2</span>
+      <span class="phase-tag">PHASE 3</span>
     </header>
 
     <section class="hero card">
-      <div class="eyebrow"><span class="status-dot"></span> ПРОТОТИП ИНФРАСТРУКТУРЫ</div>
+      <div class="eyebrow"><span class="status-dot"></span> УДАЛЁННЫЙ РАБОЧИЙ СТОЛ</div>
       <h2>Твой компьютер.<br><span>На твоём iPhone.</span></h2>
-      <p class="muted">Настраиваем безопасное сопряжение. Передача экрана и управление мышью появятся на следующих этапах.</p>
+      <p class="muted">Сопряжение через Cloudflare и просмотр экрана по WebRTC. На этом этапе передаётся только изображение: мышь и клавиатура отключены.</p>
       <div class="status-line"><span id="status-indicator" class="status-indicator idle"></span><span id="status-text">Не проверено</span></div>
       <button id="check-button" class="primary-button" type="button">Проверить API</button>
     </section>
@@ -42,17 +42,33 @@
       <button id="pair-button" class="primary-button" type="button">Запросить сопряжение</button>
     </section>
 
+    <section class="card screen-card" id="screen-card">
+      <div class="section-heading"><div><p class="eyebrow">WEBRTC</p><h3>Экран компьютера</h3></div><span class="step-number">03</span></div>
+      <div class="screen-preview" id="screen-preview">
+        <div id="screen-placeholder" class="screen-placeholder">
+          <div class="screen-placeholder-icon">RD</div>
+          <strong>Экран пока не подключён</strong>
+          <span>Введи код сопряжения выше и подтверди запрос на Windows.</span>
+        </div>
+        <img id="screen-frame" alt="Текущий кадр рабочего стола Windows" hidden>
+      </div>
+      <div class="status-line screen-status-line"><span id="screen-status-indicator" class="status-indicator idle"></span><span id="screen-status-text">Ожидает защищённого соединения</span></div>
+      <button id="disconnect-button" class="secondary-button" type="button" disabled>Отключить просмотр</button>
+      <p class="helper">Это прототип с JPEG-кадрами низкой частоты по WebRTC, не оптимизированный видеокодек. Удалённый ввод пока выключен.</p>
+    </section>
+
     <section class="card info-card">
-      <div class="section-heading"><div><p class="eyebrow">СОСТОЯНИЕ ПРОЕКТА</p><h3>Функции</h3></div><span class="step-number">03</span></div>
+      <div class="section-heading"><div><p class="eyebrow">СОСТОЯНИЕ ПРОЕКТА</p><h3>Функции</h3></div><span class="step-number">04</span></div>
       <ul class="feature-list">
         <li class="done"><span class="feature-icon">✓</span><div><strong>Веб-интерфейс</strong><small>Адаптирован для экрана iPhone</small></div></li>
         <li class="done"><span class="feature-icon">✓</span><div><strong>API и Windows Host</strong><small>Проверка связи без удалённого управления</small></div></li>
-        <li class="current"><span class="feature-icon">•</span><div><strong>Временное сопряжение</strong><small>Одноразовый код и подтверждение на ПК</small></div></li>
-        <li><span class="feature-icon">4</span><div><strong>Трансляция экрана</strong><small>WebRTC и аппаратное кодирование</small></div></li>
+        <li class="done"><span class="feature-icon">✓</span><div><strong>Временное сопряжение</strong><small>Одноразовый код и подтверждение на ПК</small></div></li>
+        <li class="current"><span class="feature-icon">•</span><div><strong>Предпросмотр экрана</strong><small>WebRTC DataChannel с уменьшенными JPEG-кадрами</small></div></li>
+        <li><span class="feature-icon">5</span><div><strong>Мышь и клавиатура</strong><small>Будут добавлены после проверки видеопотока</small></div></li>
       </ul>
     </section>
 
-    <footer><p>RemoteDesk · локальная разработка</p><p class="footer-note">В этой фазе сопряжение не включает передачу экрана или управление компьютером.</p></footer>
+    <footer><p>RemoteDesk · локальная разработка</p><p class="footer-note">Эта версия передаёт только изображение рабочего стола после подтверждения на Windows. Управляющие команды не реализованы.</p></footer>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
   </main>
   <script src="./app.js" defer></script>

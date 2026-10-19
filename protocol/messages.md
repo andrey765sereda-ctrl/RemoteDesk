@@ -1,25 +1,27 @@
-# RemoteDesk protocol — Phase 2
+# RemoteDesk protocol notes
 
-## Temporary pairing lifecycle
+## Pairing
 
-1. Windows Host generates a random 128-bit session ID, a random 256-bit host secret, and a one-time 48-bit hexadecimal pairing code.
-2. Host submits the pairing data to `POST /api/pairing/start` over HTTPS.
-3. iPhone browser submits the one-time code to `POST /api/pairing/claim`.
-4. The Worker stores only SHA-256 hashes for the code, Host secret, and ephemeral client token.
-5. The Host polls `POST /api/pairing/host-status` and requires explicit approval through `POST /api/pairing/decision`.
-6. Browser polls `POST /api/pairing/client-status` using its ephemeral client token.
-7. Code expires after five minutes and is consumed on the first successful claim.
+- `POST /api/pairing/start` — Host registers a one-time code; payload has `sessionId`, `hostSecret`, `pairCode`.
+- `POST /api/pairing/claim` — browser claims a code and receives ephemeral `clientToken`.
+- `POST /api/pairing/host-status` — Host polls pairing state.
+- `POST /api/pairing/decision` — Host approves/rejects the pending request.
+- `POST /api/pairing/client-status` — browser polls pairing state.
 
-## Pairing statuses
+## WebRTC signaling (Phase 3)
 
-- `waiting`: Host registered a code; no browser has claimed it.
-- `pending`: browser claimed the code; Host must decide.
-- `approved`: Host approved the request.
-- `rejected`: Host rejected the request.
-- `expired`: the five-minute session expired.
+SDP descriptions are JSON-serialized `RTCSessionDescription` values passed as a string in `description`. These endpoints are accepted only after the pairing session is approved:
 
-## Security notes
+- `POST /api/rtc/host-offer` — Host-secret authenticated; stores the Host offer.
+- `POST /api/rtc/client-offer` — client-token authenticated; returns `waiting` or the offer.
+- `POST /api/rtc/client-answer` — client-token authenticated; stores the browser answer.
+- `POST /api/rtc/host-answer` — Host-secret authenticated; returns `waiting` or the answer.
 
-- This mechanism is a pairing approval prototype, not a remote-control authorization system.
-- No screen frames, keyboard input, or mouse input are transmitted in Phase 2.
-- Actual desktop access requires a separate authenticated transport and per-session authorization checks.
+The Host creates a `screen-frames` DataChannel. Each binary message begins with an 8-byte header: `frame_id` (unsigned 32-bit big-endian), `chunk_index` (unsigned 16-bit big-endian), `chunk_count` (unsigned 16-bit big-endian), followed by JPEG data. The browser reassembles all chunks for a frame before displaying it.
+
+## Current non-capabilities
+
+- No mouse or keyboard input messages exist.
+- No clipboard or file transfer.
+- No TURN relay configured yet.
+- This is a low-rate JPEG preview, not an H.264 encoded video stream.

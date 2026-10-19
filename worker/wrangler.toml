@@ -5,8 +5,7 @@ workers_dev = true
 
 [vars]
 APP_ENV = "production"
-# After GitHub Pages is published, set this to the exact origin only, e.g.
-# PAGES_ORIGIN = "https://YOUR_GITHUB_USERNAME.github.io"
+PAGES_ORIGIN = "https://andrey765sereda-ctrl.github.io"
 
 [[durable_objects.bindings]]
 name = "PAIRING_DIRECTORY"

@@ -14,11 +14,25 @@ interface PairingSession {
   expiresAt: number;
   status: PairingStatus;
   clientTokenHash?: string;
+  hostOffer?: string;
+  clientAnswer?: string;
 }
 
 interface RateBucket {
   count: number;
   resetAt: number;
+}
+
+function isRtcDescription(value: unknown, expectedType: "offer" | "answer"): value is string {
+  if (typeof value !== "string" || value.length > 100_000) return false;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object") return false;
+    const description = parsed as Record<string, unknown>;
+    return description.type === expectedType && typeof description.sdp === "string" && description.sdp.length > 0 && description.sdp.length <= 90_000;
+  } catch {
+    return false;
+  }
 }
 
 const JSON_HEADERS: Record<string, string> = {
@@ -67,9 +81,11 @@ async function readJson(request: Request): Promise<Record<string, unknown> | nul
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().includes("application/json")) return null;
   const declaredLength = Number(request.headers.get("content-length") ?? "0");
-  if (declaredLength > 8192) return null;
+  // SDP descriptions are larger than ordinary pairing requests; keep a strict cap.
+  const maxBytes = 128 * 1024;
+  if (declaredLength > maxBytes) return null;
   const text = await request.text();
-  if (text.length > 8192) return null;
+  if (text.length > maxBytes) return null;
   try {
     const parsed: unknown = JSON.parse(text);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -98,9 +114,9 @@ export default {
       return json({
         app: "RemoteDesk API",
         status: "ok",
-        version: "0.2.0",
+        version: "0.3.0",
         environment: env.APP_ENV ?? "unknown",
-        capabilities: ["health-check", "temporary-pairing", "host-approval"],
+        capabilities: ["health-check", "temporary-pairing", "host-approval", "webrtc-screen-preview"],
         remoteControlEnabled: false,
       }, 200, origin, env);
     }
@@ -111,6 +127,10 @@ export default {
       "/api/pairing/host-status",
       "/api/pairing/decision",
       "/api/pairing/client-status",
+      "/api/rtc/host-offer",
+      "/api/rtc/host-answer",
+      "/api/rtc/client-offer",
+      "/api/rtc/client-answer",
     ]);
 
     if (!supported.has(url.pathname) || request.method !== "POST") {
@@ -118,7 +138,7 @@ export default {
     }
 
     const body = await readJson(request);
-    if (!body) return json({ error: "invalid_json", message: "Expected a JSON object smaller than 8 KB." }, 400, origin, env);
+    if (!body) return json({ error: "invalid_json", message: "Expected a JSON object smaller than 128 KB." }, 400, origin, env);
 
     const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
     const headers = new Headers({
@@ -165,6 +185,10 @@ export class PairingDirectory {
     if (path === "/api/pairing/host-status") return this.hostStatus(body);
     if (path === "/api/pairing/decision") return this.decision(body);
     if (path === "/api/pairing/client-status") return this.clientStatus(body);
+    if (path === "/api/rtc/host-offer") return this.hostOffer(body);
+    if (path === "/api/rtc/host-answer") return this.hostAnswer(body);
+    if (path === "/api/rtc/client-offer") return this.clientOffer(body);
+    if (path === "/api/rtc/client-answer") return this.clientAnswer(body);
     return this.reply({ error: "not_found" }, 404);
   }
 
@@ -287,6 +311,8 @@ export class PairingDirectory {
     if (!session || !this.secureEquals(await this.hashed(hostSecret), session.hostSecretHash)) return this.reply({ error: "unauthorized" }, 401);
     if (this.isExpired(session) && session.status !== "expired") {
       session.status = "expired";
+      session.hostOffer = undefined;
+      session.clientAnswer = undefined;
       await this.saveSession(session);
     }
     return this.reply({ ok: true, status: session.status, expiresAt: session.expiresAt });
@@ -309,6 +335,7 @@ export class PairingDirectory {
       }
       if (session.status !== "pending") return this.reply({ error: "no_pending_request", status: session.status }, 409);
       session.status = approve ? "approved" : "rejected";
+      if (approve) session.expiresAt = Date.now() + 30 * 60_000;
       await this.saveSession(session);
       return this.reply({ ok: true, status: session.status });
     });
@@ -324,8 +351,77 @@ export class PairingDirectory {
     }
     if (this.isExpired(session) && session.status !== "expired") {
       session.status = "expired";
+      session.hostOffer = undefined;
+      session.clientAnswer = undefined;
       await this.saveSession(session);
     }
     return this.reply({ ok: true, status: session.status, expiresAt: session.expiresAt });
+  }
+
+  private async authorizedHost(body: Record<string, unknown>): Promise<PairingSession | null> {
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+    const hostSecret = typeof body.hostSecret === "string" ? body.hostSecret : "";
+    if (!/^[a-f0-9]{32}$/i.test(sessionId) || !/^[a-f0-9]{64}$/i.test(hostSecret)) return null;
+    const session = await this.loadSession(sessionId);
+    if (!session || !this.secureEquals(await this.hashed(hostSecret), session.hostSecretHash)) return null;
+    if (this.isExpired(session)) {
+      session.status = "expired";
+      session.hostOffer = undefined;
+      session.clientAnswer = undefined;
+      await this.saveSession(session);
+      return null;
+    }
+    if (session.status !== "approved") return null;
+    return session;
+  }
+
+  private async authorizedClient(body: Record<string, unknown>): Promise<PairingSession | null> {
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+    const clientToken = typeof body.clientToken === "string" ? body.clientToken : "";
+    if (!/^[a-f0-9]{32}$/i.test(sessionId) || !/^[a-f0-9]{64}$/i.test(clientToken)) return null;
+    const session = await this.loadSession(sessionId);
+    if (!session || !session.clientTokenHash || !this.secureEquals(await this.hashed(clientToken), session.clientTokenHash)) return null;
+    if (this.isExpired(session)) {
+      session.status = "expired";
+      session.hostOffer = undefined;
+      session.clientAnswer = undefined;
+      await this.saveSession(session);
+      return null;
+    }
+    if (session.status !== "approved") return null;
+    return session;
+  }
+
+  private async hostOffer(body: Record<string, unknown>): Promise<Response> {
+    const session = await this.authorizedHost(body);
+    if (!session) return this.reply({ error: "unauthorized_or_session_not_approved" }, 401);
+    const description = body.description;
+    if (!isRtcDescription(description, "offer")) return this.reply({ error: "invalid_webrtc_offer" }, 400);
+    session.hostOffer = description;
+    session.clientAnswer = undefined;
+    await this.saveSession(session);
+    return this.reply({ ok: true, status: "offer_ready" });
+  }
+
+  private async hostAnswer(body: Record<string, unknown>): Promise<Response> {
+    const session = await this.authorizedHost(body);
+    if (!session) return this.reply({ error: "unauthorized_or_session_not_approved" }, 401);
+    return this.reply({ ok: true, status: session.clientAnswer ? "ready" : "waiting", description: session.clientAnswer ?? null });
+  }
+
+  private async clientOffer(body: Record<string, unknown>): Promise<Response> {
+    const session = await this.authorizedClient(body);
+    if (!session) return this.reply({ error: "unauthorized_or_session_not_approved" }, 401);
+    return this.reply({ ok: true, status: session.hostOffer ? "ready" : "waiting", description: session.hostOffer ?? null });
+  }
+
+  private async clientAnswer(body: Record<string, unknown>): Promise<Response> {
+    const session = await this.authorizedClient(body);
+    if (!session) return this.reply({ error: "unauthorized_or_session_not_approved" }, 401);
+    const description = body.description;
+    if (!isRtcDescription(description, "answer")) return this.reply({ error: "invalid_webrtc_answer" }, 400);
+    session.clientAnswer = description;
+    await this.saveSession(session);
+    return this.reply({ ok: true, status: "answer_ready" });
   }
 }

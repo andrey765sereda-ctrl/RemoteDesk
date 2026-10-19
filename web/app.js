@@ -9,18 +9,32 @@
   const pairButton = document.querySelector('#pair-button');
   const pairStatusText = document.querySelector('#pair-status-text');
   const pairStatusIndicator = document.querySelector('#pair-status-indicator');
+  const screenFrame = document.querySelector('#screen-frame');
+  const screenPlaceholder = document.querySelector('#screen-placeholder');
+  const screenStatusText = document.querySelector('#screen-status-text');
+  const screenStatusIndicator = document.querySelector('#screen-status-indicator');
+  const disconnectButton = document.querySelector('#disconnect-button');
   const toast = document.querySelector('#toast');
+
   let apiBase = DEFAULT_API_URL;
   let toastTimeout;
   let pairingInProgress = false;
+  let activePeerConnection = null;
+  let activeDataChannel = null;
+  let latestFrameUrl = null;
+  let firstFrameResolver = null;
+  let firstFrameRejecter = null;
+  let frameBuffers = new Map();
 
   apiInput.value = DEFAULT_API_URL;
+
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
   function showToast(message) {
     toast.textContent = message;
     toast.classList.add('show');
     clearTimeout(toastTimeout);
-    toastTimeout = setTimeout(() => toast.classList.remove('show'), 3200);
+    toastTimeout = setTimeout(() => toast.classList.remove('show'), 3600);
   }
 
   function setStatus(kind, message) {
@@ -31,6 +45,11 @@
   function setPairStatus(kind, message) {
     pairStatusIndicator.className = `status-indicator ${kind}`;
     pairStatusText.textContent = message;
+  }
+
+  function setScreenStatus(kind, message) {
+    screenStatusIndicator.className = `status-indicator ${kind}`;
+    screenStatusText.textContent = message;
   }
 
   function validateApiUrl(raw) {
@@ -84,10 +103,7 @@
     setStatus('idle', 'Проверяем доступность API…');
     try {
       const response = await fetch(`${apiBase}/api/health`, {
-        method: 'GET',
-        headers: { 'Accept': 'application/json' },
-        cache: 'no-store',
-        mode: 'cors'
+        method: 'GET', headers: { 'Accept': 'application/json' }, cache: 'no-store', mode: 'cors'
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
@@ -105,8 +121,7 @@
 
   pairCodeInput.addEventListener('input', () => {
     const code = pairCodeInput.value.toUpperCase().replace(/[^A-F0-9]/g, '').slice(0, 12);
-    const formatted = [code.slice(0, 4), code.slice(4, 8), code.slice(8, 12)].filter(Boolean).join('-');
-    pairCodeInput.value = formatted;
+    pairCodeInput.value = [code.slice(0, 4), code.slice(4, 8), code.slice(8, 12)].filter(Boolean).join('-');
   });
 
   pairButton.addEventListener('click', async () => {
@@ -129,18 +144,20 @@
     try {
       const claim = await postApi('/api/pairing/claim', { pairCode });
       setPairStatus('waiting', 'Запрос отправлен. Подтверди его в терминале Windows.');
-      showToast('Запрос отправлен на компьютер. Не закрывай эту страницу.');
+      showToast('Запрос отправлен на компьютер. Подтверди его в Windows.');
 
       const deadline = Date.now() + 5 * 60 * 1000;
       while (Date.now() < deadline) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await sleep(2000);
         const state = await postApi('/api/pairing/client-status', {
           sessionId: claim.sessionId,
           clientToken: claim.clientToken,
         });
         if (state.status === 'approved') {
-          setPairStatus('good', 'Сопряжение подтверждено на ПК. Передача экрана пока не включена.');
-          showToast('ПК подтвердил запрос. Видеопоток будет добавлен следующим этапом.');
+          setPairStatus('good', 'Сопряжение подтверждено. Подключаем защищённый канал…');
+          await startScreenPreview(claim.sessionId, claim.clientToken);
+          pairButton.textContent = 'Сопряжение подтверждено';
+          pairButton.disabled = true;
           return;
         }
         if (state.status === 'rejected') {
@@ -148,19 +165,211 @@
           return;
         }
         if (state.status === 'expired') {
-          setPairStatus('bad', 'Код истёк. Перезапусти RemoteDesk Host и введи новый код.');
+          setPairStatus('bad', 'Сессия истекла. Перезапусти RemoteDesk Host и создай новый код.');
           return;
         }
         setPairStatus('waiting', 'Ожидаем подтверждения на компьютере…');
       }
       setPairStatus('bad', 'Время ожидания истекло. Создай новый код на ПК.');
     } catch (error) {
-      setPairStatus('bad', `Сопряжение не удалось: ${error.message || 'ошибка сети'}`);
-      showToast(`Ошибка сопряжения: ${error.message || 'ошибка сети'}`);
+      setPairStatus('bad', `Подключение не удалось: ${error.message || 'ошибка сети'}`);
+      setScreenStatus('bad', 'Не удалось начать предпросмотр');
+      showToast(`Ошибка подключения: ${error.message || 'ошибка сети'}`);
     } finally {
       pairingInProgress = false;
-      pairButton.disabled = false;
-      pairButton.textContent = 'Запросить сопряжение';
+      if (pairButton.textContent !== 'Сопряжение подтверждено') {
+        pairButton.disabled = false;
+        pairButton.textContent = 'Запросить сопряжение';
+      }
     }
   });
+
+  async function waitForIceGatheringComplete(pc, timeoutMs = 25000) {
+    if (pc.iceGatheringState === 'complete') return;
+    await new Promise((resolve, reject) => {
+      let done = false;
+      const finish = (error) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        pc.removeEventListener('icegatheringstatechange', check);
+        if (error) reject(error); else resolve();
+      };
+      const check = () => {
+        if (pc.iceGatheringState === 'complete') finish();
+      };
+      const timer = setTimeout(() => finish(new Error('Истекло время сбора ICE-кандидатов')), timeoutMs);
+      pc.addEventListener('icegatheringstatechange', check);
+      check();
+    });
+  }
+
+  async function waitForHostOffer(sessionId, clientToken, timeoutMs = 120000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const state = await postApi('/api/rtc/client-offer', { sessionId, clientToken });
+      if (state.status === 'ready' && typeof state.description === 'string') {
+        try { return JSON.parse(state.description); }
+        catch { throw new Error('Cloudflare вернул некорректное WebRTC-предложение'); }
+      }
+      await sleep(1500);
+    }
+    throw new Error('Windows Host не прислал WebRTC-предложение за отведённое время');
+  }
+
+  async function startScreenPreview(sessionId, clientToken) {
+    disconnectScreen(false);
+    setScreenStatus('waiting', 'Создаём защищённое WebRTC-соединение…');
+    disconnectButton.disabled = true;
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }],
+    });
+    activePeerConnection = pc;
+    let firstFrameResolve;
+    let firstFrameReject;
+    const firstFrame = new Promise((resolve, reject) => {
+      firstFrameResolve = resolve;
+      firstFrameReject = reject;
+    });
+    firstFrameResolver = firstFrameResolve;
+    firstFrameRejecter = firstFrameReject;
+    // Register a rejection handler immediately in case signaling fails before the first-frame wait begins.
+    firstFrame.catch(() => {});
+
+    pc.onconnectionstatechange = () => {
+      const state = pc.connectionState;
+      if (state === 'connecting') setScreenStatus('waiting', 'Соединяем устройства…');
+      if (state === 'connected') setScreenStatus('waiting', 'Канал установлен. Ожидаем первый кадр…');
+      if (state === 'failed') {
+        setScreenStatus('bad', 'WebRTC не смог соединить устройства. Сети может потребоваться TURN.');
+        if (firstFrameRejecter) firstFrameRejecter(new Error('WebRTC-соединение завершилось ошибкой'));
+      }
+      if (state === 'disconnected') setScreenStatus('waiting', 'Связь временно потеряна…');
+      if (state === 'closed') setScreenStatus('idle', 'Просмотр отключён');
+    };
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === 'failed') setScreenStatus('bad', 'ICE-соединение не установлено. Проверь сеть или TURN.');
+    };
+    pc.ondatachannel = event => {
+      const channel = event.channel;
+      if (channel.label !== 'screen-frames') {
+        channel.close();
+        return;
+      }
+      activeDataChannel = channel;
+      channel.binaryType = 'arraybuffer';
+      channel.onopen = () => {
+        disconnectButton.disabled = false;
+        setScreenStatus('waiting', 'Получаем изображение рабочего стола…');
+      };
+      channel.onclose = () => setScreenStatus('idle', 'Канал просмотра закрыт');
+      channel.onerror = () => setScreenStatus('bad', 'Ошибка канала изображения');
+      channel.onmessage = event => consumeFrameChunk(event.data);
+    };
+
+    try {
+      const offer = await waitForHostOffer(sessionId, clientToken);
+      await pc.setRemoteDescription(offer);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await waitForIceGatheringComplete(pc);
+      await postApi('/api/rtc/client-answer', {
+        sessionId,
+        clientToken,
+        description: JSON.stringify(pc.localDescription),
+      });
+      setScreenStatus('waiting', 'Ответ отправлен Windows. Устанавливаем канал изображения…');
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Не получен первый кадр за 45 секунд')), 45000);
+        firstFrame.then(() => { clearTimeout(timer); resolve(); }, error => { clearTimeout(timer); reject(error); });
+      });
+      setScreenStatus('good', 'Экран подключён · режим только просмотра');
+      showToast('Изображение Windows получено. Управление вводом пока выключено.');
+    } catch (error) {
+      disconnectScreen(false);
+      throw error;
+    }
+  }
+
+  function consumeFrameChunk(data) {
+    if (!(data instanceof ArrayBuffer) || data.byteLength < 9) return;
+    const packet = new Uint8Array(data);
+    const view = new DataView(data);
+    const frameId = view.getUint32(0, false);
+    const chunkIndex = view.getUint16(4, false);
+    const chunkCount = view.getUint16(6, false);
+    if (chunkCount < 1 || chunkCount > 512 || chunkIndex >= chunkCount) return;
+
+    let frame = frameBuffers.get(frameId);
+    if (!frame) {
+      frame = { count: chunkCount, parts: new Array(chunkCount), received: 0, bytes: 0 };
+      frameBuffers.set(frameId, frame);
+    }
+    if (frame.count !== chunkCount || frame.parts[chunkIndex]) return;
+    const part = packet.slice(8);
+    frame.parts[chunkIndex] = part;
+    frame.received += 1;
+    frame.bytes += part.byteLength;
+
+    while (frameBuffers.size > 3) {
+      const oldestId = frameBuffers.keys().next().value;
+      frameBuffers.delete(oldestId);
+    }
+    if (frame.received !== frame.count) return;
+
+    const jpeg = new Uint8Array(frame.bytes);
+    let offset = 0;
+    for (const chunk of frame.parts) {
+      jpeg.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    frameBuffers.delete(frameId);
+    if (latestFrameUrl) URL.revokeObjectURL(latestFrameUrl);
+    latestFrameUrl = URL.createObjectURL(new Blob([jpeg], { type: 'image/jpeg' }));
+    screenFrame.src = latestFrameUrl;
+    screenFrame.hidden = false;
+    screenPlaceholder.hidden = true;
+    if (firstFrameResolver) {
+      firstFrameResolver();
+      firstFrameResolver = null;
+      firstFrameRejecter = null;
+    }
+  }
+
+  function disconnectScreen(showStatus = true) {
+    frameBuffers.clear();
+    if (activeDataChannel) {
+      try { activeDataChannel.close(); } catch { /* already closed */ }
+      activeDataChannel = null;
+    }
+    if (activePeerConnection) {
+      try { activePeerConnection.close(); } catch { /* already closed */ }
+      activePeerConnection = null;
+    }
+    firstFrameResolver = null;
+    if (firstFrameRejecter) {
+      firstFrameRejecter(new Error('Предпросмотр отключён'));
+      firstFrameRejecter = null;
+    }
+    if (latestFrameUrl) {
+      URL.revokeObjectURL(latestFrameUrl);
+      latestFrameUrl = null;
+    }
+    screenFrame.removeAttribute('src');
+    screenFrame.hidden = true;
+    screenPlaceholder.hidden = false;
+    disconnectButton.disabled = true;
+    if (showStatus) setScreenStatus('idle', 'Просмотр отключён');
+  }
+
+  disconnectButton.addEventListener('click', () => {
+    disconnectScreen(true);
+    setPairStatus('idle', 'Просмотр отключён на этом iPhone. Для нового сеанса создай новый код на Windows.');
+    pairCodeInput.value = '';
+    pairButton.disabled = false;
+    pairButton.textContent = 'Запросить сопряжение';
+    showToast('Просмотр отключён на iPhone. Останови Host на Windows, чтобы закрыть его сторону.');
+  });
+
+  window.addEventListener('pagehide', () => disconnectScreen(false));
 })();

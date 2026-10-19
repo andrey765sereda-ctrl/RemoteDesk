@@ -1,18 +1,5 @@
-# Phase 2 — Temporary pairing test
+# RemoteDesk — Phase 2: temporary device pairing (historical)
 
-## Update and publish
+This document records the pairing milestone. The current implementation includes the next milestone, **Phase 3: a read-only WebRTC screen preview**; see `PHASE-3.md` for the current setup instructions.
 
-1. Overlay this archive on the project directory while keeping `.git`.
-2. Commit and push the changes so GitHub Pages publishes the updated client.
-3. From `worker/`, run `npm.cmd install` and `npx.cmd wrangler deploy`. This applies the Durable Object migration.
-4. Restart the Host with `REMOTEDESK_API_URL` set.
-
-## End-to-end test
-
-- Check `GET /api/health`; expected `version` is `0.2.0` and `remoteControlEnabled` remains `false`.
-- Host prints a one-time code.
-- Submit code on the GitHub Pages site.
-- Confirm the prompt in the Host terminal.
-- Browser should display that pairing was approved or rejected.
-
-This is a security and workflow prototype only. No remote-control actions are enabled in this phase.
+Pairing remains temporary and requires explicit Windows-terminal approval. One-time codes expire after 5 minutes. After approval, the session is extended for up to 30 minutes to allow WebRTC signaling and screen preview. Mouse/keyboard input remains disabled.
