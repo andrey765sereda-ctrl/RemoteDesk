@@ -92,6 +92,48 @@ struct SignalResponse {
     description: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IceServersResponse {
+    ice_servers: Vec<RemoteIceServer>,
+}
+
+#[derive(Deserialize)]
+struct RemoteIceServer {
+    urls: RemoteIceUrls,
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    credential: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RemoteIceUrls {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl RemoteIceUrls {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(url) => vec![url],
+            Self::Many(urls) => urls,
+        }
+    }
+}
+
+fn summarize_candidates(sdp: &str) -> String {
+    let (mut host, mut srflx, mut relay, mut prflx) = (0usize, 0usize, 0usize, 0usize);
+    for line in sdp.lines().filter(|line| line.starts_with("a=candidate:")) {
+        if line.contains(" typ host") { host += 1; }
+        else if line.contains(" typ srflx") { srflx += 1; }
+        else if line.contains(" typ relay") { relay += 1; }
+        else if line.contains(" typ prflx") { prflx += 1; }
+    }
+    format!("host={host}, srflx={srflx}, relay={relay}, prflx={prflx}")
+}
+
 fn make_pairing_values() -> (String, String, String) {
     let session_id = Uuid::new_v4().simple().to_string();
     let host_secret = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
@@ -243,15 +285,57 @@ async fn pairing_loop() {
     }
 }
 
+async fn load_ice_servers(client: &reqwest::Client, api_base: &str, session_id: &str, host_secret: &str) -> Vec<RTCIceServer> {
+    let fallback = || vec![RTCIceServer {
+        urls: vec!["stun:stun.l.google.com:19302".to_string()],
+        ..Default::default()
+    }];
+    let response = match post_json(
+        client,
+        &format!("{api_base}/api/rtc/ice-servers"),
+        &HostAuthRequest { session_id, host_secret },
+    ).await {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("Could not request TURN credentials ({error}); falling back to STUN only. Remote networks may fail.");
+            return fallback();
+        }
+    };
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        eprintln!("TURN credentials unavailable (HTTP {status}: {body}); falling back to STUN only. Set TURN_KEY_ID and TURN_API_TOKEN in Cloudflare for relay support.");
+        return fallback();
+    }
+    match response.json::<IceServersResponse>().await {
+        Ok(data) if !data.ice_servers.is_empty() => {
+            let servers = data.ice_servers.into_iter().map(|server| RTCIceServer {
+                urls: server.urls.into_vec(),
+                username: server.username,
+                credential: server.credential,
+                ..Default::default()
+            }).collect::<Vec<_>>();
+            println!("Loaded {} STUN/TURN server entries from Cloudflare.", servers.len());
+            servers
+        }
+        Ok(_) => {
+            eprintln!("Cloudflare returned an empty ICE server list; falling back to STUN only.");
+            fallback()
+        }
+        Err(error) => {
+            eprintln!("Could not parse Cloudflare ICE server list ({error}); falling back to STUN only.");
+            fallback()
+        }
+    }
+}
+
 async fn run_screen_stream(client: &reqwest::Client, api_base: &str, session_id: &str, host_secret: &str) -> Result<()> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs().context("register WebRTC codecs")?;
     let api = APIBuilder::new().with_media_engine(media_engine).build();
+    let ice_servers = load_ice_servers(client, api_base, session_id, host_secret).await;
     let config = RTCConfiguration {
-        ice_servers: vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
-            ..Default::default()
-        }],
+        ice_servers,
         ..Default::default()
     };
     let peer_connection = std::sync::Arc::new(api.new_peer_connection(config).await.context("create WebRTC peer connection")?);
@@ -269,6 +353,7 @@ async fn run_screen_stream(client: &reqwest::Client, api_base: &str, session_id:
     let _ = tokio::time::timeout(Duration::from_secs(25), gather_complete.recv()).await
         .context("timed out gathering ICE candidates")?;
     let local_description = peer_connection.local_description().await.ok_or_else(|| anyhow!("WebRTC offer was not created"))?;
+    println!("Local ICE candidates: {}", summarize_candidates(&local_description.sdp));
     let description_json = serde_json::to_string(&local_description).context("serialize WebRTC offer")?;
     let offer_request = HostSignalRequest { session_id, host_secret, description: &description_json };
     let response = post_json(client, &format!("{api_base}/api/rtc/host-offer"), &offer_request).await
@@ -306,6 +391,7 @@ async fn run_screen_stream(client: &reqwest::Client, api_base: &str, session_id:
     };
 
     let answer: RTCSessionDescription = serde_json::from_str(&answer_description).context("parse iPhone WebRTC answer")?;
+    println!("iPhone ICE candidates: {}", summarize_candidates(&answer.sdp));
     peer_connection.set_remote_description(answer).await.context("apply iPhone WebRTC answer")?;
     println!("WebRTC answer applied. Waiting for the encrypted data channel to open…");
     tokio::time::timeout(Duration::from_secs(45), open_rx.recv()).await

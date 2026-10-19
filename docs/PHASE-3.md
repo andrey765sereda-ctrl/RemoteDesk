@@ -50,7 +50,38 @@ SDP is exchanged only after the Durable Object session is approved. Descriptions
 ## Limitations / security
 
 - Mouse, keyboard, clipboard and file transfer are not implemented.
-- There is no TURN service yet. Some remote networks will fail to connect even if local Wi-Fi works.
+- TURN is optional during initial direct-connect testing, but it is strongly recommended for reliable remote/mobile networks. This archive can request short-lived Cloudflare Realtime TURN credentials from the Worker when TURN_KEY_ID and TURN_API_TOKEN are configured. Without those secrets it falls back to Google STUN and remote networks can fail; if local Wi-Fi also fails, inspect Host ICE candidate counts and the browser screen-status message.
 - No persistent trusted-device profile: each session requires a new one-time code and local approval.
 - Do not enable router port forwarding for this Host. Its local health endpoint remains bound to `127.0.0.1:47831`.
 - This code has not been compiled on the developer's Windows device in this environment. Run `cargo run` locally and report any compiler error before treating the phase as finished.
+
+
+## Configure managed TURN (recommended for mobile/external networks)
+
+1. In Cloudflare Realtime, create a TURN key and an API token authorized to generate TURN credentials. Keep the token private.
+2. From `worker/`, set secrets without committing them to Git:
+
+```powershell
+npx.cmd wrangler secret put TURN_KEY_ID
+npx.cmd wrangler secret put TURN_API_TOKEN
+npx.cmd wrangler deploy
+```
+
+3. Restart the Windows Host and start a new pairing session. Both endpoints request temporary ICE server configuration after approval. Credentials expire after one hour. TURN may incur usage charges; check Cloudflare Realtime pricing before sustained use.
+
+## Diagnostics
+
+The Host prints local candidate counts (`host`, `srflx`, `relay`) and the iPhone answer candidate counts. If `relay=0`, TURN credentials were not applied. The iPhone page reports the ICE state in the screen status and logs candidate errors to the browser console. A `failed` ICE state means the signaling exchange completed but no usable network candidate pair connected. If the data channel opens but no frame arrives, investigate screen capture rather than network setup.
+
+
+## If local Wi-Fi still cannot connect
+
+1. Make sure the Windows network profile is **Private** for your home network.
+2. If testing direct STUN before TURN is configured, run PowerShell as Administrator in `windows-host/` after `cargo run` has built the app:
+
+```powershell
+$exe = (Resolve-Path ".\target\debug\remotedesk-host.exe").Path
+New-NetFirewallRule -DisplayName "RemoteDesk WebRTC (Private)" -Direction Inbound -Program $exe -Protocol UDP -Action Allow -Profile Private
+```
+
+This rule is only for the compiled Host executable on the Private profile. It does not open the local health server to the Internet. Remove the rule later with `Remove-NetFirewallRule -DisplayName "RemoteDesk WebRTC (Private)"` if you no longer use it.

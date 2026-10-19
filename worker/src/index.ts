@@ -1,6 +1,8 @@
 interface Env {
   APP_ENV?: string;
   PAGES_ORIGIN?: string;
+  TURN_KEY_ID?: string;
+  TURN_API_TOKEN?: string;
   PAIRING_DIRECTORY: DurableObjectNamespace;
 }
 
@@ -114,7 +116,7 @@ export default {
       return json({
         app: "RemoteDesk API",
         status: "ok",
-        version: "0.3.0",
+        version: "0.3.1",
         environment: env.APP_ENV ?? "unknown",
         capabilities: ["health-check", "temporary-pairing", "host-approval", "webrtc-screen-preview"],
         remoteControlEnabled: false,
@@ -131,6 +133,7 @@ export default {
       "/api/rtc/host-answer",
       "/api/rtc/client-offer",
       "/api/rtc/client-answer",
+      "/api/rtc/ice-servers",
     ]);
 
     if (!supported.has(url.pathname) || request.method !== "POST") {
@@ -172,7 +175,7 @@ export default {
  * pairing request initiated by their own Windows Host process.
  */
 export class PairingDirectory {
-  constructor(private readonly state: DurableObjectState, private readonly _env: Env) {}
+  constructor(private readonly state: DurableObjectState, private readonly env: Env) {}
 
   async fetch(request: Request): Promise<Response> {
     if (request.method !== "POST") return this.reply({ error: "method_not_allowed" }, 405);
@@ -189,6 +192,7 @@ export class PairingDirectory {
     if (path === "/api/rtc/host-answer") return this.hostAnswer(body);
     if (path === "/api/rtc/client-offer") return this.clientOffer(body);
     if (path === "/api/rtc/client-answer") return this.clientAnswer(body);
+    if (path === "/api/rtc/ice-servers") return this.iceServers(body);
     return this.reply({ error: "not_found" }, 404);
   }
 
@@ -423,5 +427,54 @@ export class PairingDirectory {
     session.clientAnswer = description;
     await this.saveSession(session);
     return this.reply({ ok: true, status: "answer_ready" });
+  }
+
+  /** Return short-lived Cloudflare TURN credentials only to an approved paired endpoint. */
+  private async iceServers(body: Record<string, unknown>): Promise<Response> {
+    const session = await this.authorizedHost(body) ?? await this.authorizedClient(body);
+    if (!session) return this.reply({ error: "unauthorized_or_session_not_approved" }, 401);
+    if (!(await this.rateLimit(`rl:ice:${session.sessionId}`, 12, 60_000))) {
+      return this.reply({ error: "rate_limited" }, 429);
+    }
+
+    const keyId = this.env.TURN_KEY_ID?.trim();
+    const apiToken = this.env.TURN_API_TOKEN?.trim();
+    if (!keyId || !apiToken) {
+      return this.reply({
+        error: "turn_not_configured",
+        message: "Cloudflare TURN credentials are not configured. Direct STUN-only fallback may fail on restrictive networks."
+      }, 503);
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(keyId)}/credentials/generate-ice-servers`, {
+        method: "POST",
+        headers: {
+          "authorization": `Bearer ${apiToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ ttl: 3600 }),
+      });
+    } catch {
+      return this.reply({ error: "turn_service_unreachable" }, 502);
+    }
+    if (!response.ok) {
+      // Do not expose account credentials or raw upstream diagnostics to the client.
+      return this.reply({ error: "turn_credentials_failed", upstreamStatus: response.status }, 502);
+    }
+
+    let data: unknown;
+    try { data = await response.json(); } catch { return this.reply({ error: "invalid_turn_response" }, 502); }
+    if (!data || typeof data !== "object" || !Array.isArray((data as Record<string, unknown>).iceServers)) {
+      return this.reply({ error: "invalid_turn_response" }, 502);
+    }
+    const iceServers = (data as { iceServers: unknown[] }).iceServers.filter((item) => {
+      if (!item || typeof item !== "object") return false;
+      const urls = (item as Record<string, unknown>).urls;
+      return typeof urls === "string" || (Array.isArray(urls) && urls.every((url) => typeof url === "string"));
+    });
+    if (iceServers.length === 0) return this.reply({ error: "empty_turn_response" }, 502);
+    return this.reply({ iceServers, ttl: 3600 });
   }
 }
