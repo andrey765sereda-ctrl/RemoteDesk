@@ -103,16 +103,32 @@ const JSON_HEADERS: Record<string, string> = {
   "pragma": "no-cache",
 };
 
+const DEFAULT_ALLOWED_ORIGINS = new Set([
+  "https://andrey765sereda-ctrl.github.io",
+]);
+
 function isAllowedOrigin(origin: string, env: Env): boolean {
   try {
     const parsed = new URL(origin);
     const local = (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") && parsed.protocol === "http:";
     if (local) return true;
     if (parsed.protocol !== "https:") return false;
-    if (env.PAGES_ORIGIN) return origin === env.PAGES_ORIGIN;
-    // Transitional default. Once GitHub Pages URL is known, set PAGES_ORIGIN
-    // in wrangler.toml to the exact origin (e.g. https://username.github.io).
-    return parsed.hostname.endsWith(".github.io");
+
+    // Normalize configured values to URL origins. This also safely handles a
+    // mistakenly configured PAGES_ORIGIN that includes the /RemoteDesk path.
+    const configuredOrigins = (env.PAGES_ORIGIN ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .map((value) => {
+        try { return new URL(value).origin; } catch { return ""; }
+      })
+      .filter(Boolean);
+
+    // Only this project's canonical GitHub Pages origin is allowed by default.
+    // Additional exact origins can be listed in PAGES_ORIGIN, comma-separated.
+    const allowedOrigins = new Set([...DEFAULT_ALLOWED_ORIGINS, ...configuredOrigins]);
+    return allowedOrigins.has(parsed.origin);
   } catch {
     return false;
   }
@@ -121,7 +137,7 @@ function isAllowedOrigin(origin: string, env: Env): boolean {
 function corsHeaders(origin: string | null, env: Env): Record<string, string> {
   const headers: Record<string, string> = {
     "access-control-allow-methods": "GET, POST, OPTIONS",
-    "access-control-allow-headers": "content-type",
+    "access-control-allow-headers": "content-type, authorization, x-requested-with",
     "access-control-max-age": "600",
     "vary": "Origin",
   };

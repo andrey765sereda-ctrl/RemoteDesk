@@ -1,7 +1,6 @@
 (() => {
   'use strict';
   const DEFAULT_API_URL = 'https://remotedesk-api.andrey-765-sereda.workers.dev';
-  const DEFAULT_STREAM_URL = 'https://flygribbpc.tail28d1f0.ts.net/remotedesk';
   const $ = selector => document.querySelector(selector);
   const apiInput = $('#api-url');
   const saveButton = $('#save-url');
@@ -47,9 +46,6 @@
   const heldUi = new Set();
 
   apiInput.value = DEFAULT_API_URL;
-  // Pre-fill this user's MediaMTX HTTPS viewer URL; a previous non-empty choice is retained.
-  try { streamUrlInput.value = localStorage.getItem('remotedesk.streamUrl') || DEFAULT_STREAM_URL; }
-  catch { streamUrlInput.value = DEFAULT_STREAM_URL; }
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   function showToast(message) {
@@ -83,7 +79,8 @@
         body: JSON.stringify(body), cache: 'no-store', mode: 'cors',
       });
     } catch (cause) {
-      throw new Error(`${path}: ошибка сети/CORS (${cause?.message || cause}). Проверь URL Worker и интернет.`);
+      const pageOrigin = window.location.origin;
+      throw new Error(`${path}: запрос не завершился (${cause?.message || cause}). Страница: ${pageOrigin}; API: ${apiBase}. Проверь доступность Worker и совпадение PAGES_ORIGIN с origin сайта.`);
     }
     let data = {};
     try { data = await response.json(); } catch { /* non-JSON response */ }
@@ -375,9 +372,8 @@
     if (url.username || url.password) { showToast('Не вставляй логин и пароль в URL видео.'); return; }
     url.searchParams.set('autoplay', 'true');
     url.searchParams.set('muted', 'true');
-    url.searchParams.set('playsinline', 'true');
+    url.searchParams.set('playsInline', 'true');
     url.searchParams.set('controls', 'true');
-    try { localStorage.setItem('remotedesk.streamUrl', url.origin + url.pathname); } catch {}
     streamPlaceholder.hidden = true;
     streamFrame.hidden = false;
     streamFrame.src = url.toString();
@@ -398,11 +394,6 @@
       streamStatus.textContent = 'Страница MediaMTX загружена. Если изображение чёрное, проверь наличие потока и ICE-кандидат Tailscale IP.';
     }
   });
-
-  // Auto-start the embedded player using the configured URL. The user can stop it with the button.
-  window.setTimeout(() => {
-    if (streamUrlInput.value.trim() && streamFrame.hidden) $('#stream-load').click();
-  }, 500);
 
   setControlReady(false, 'Сначала выполни сопряжение');
   controlCard.hidden = false;
