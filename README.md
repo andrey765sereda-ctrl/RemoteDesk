@@ -2,7 +2,7 @@
 
 RemoteDesk is an experimental Windows 11 + iPhone remote-desktop project built without requiring a Mac. The static iPhone web client is published with GitHub Pages. Cloudflare Workers + a Durable Object coordinate one-time pairing and WebRTC signaling. A Rust Host on Windows captures the desktop and sends an H.264 video track over WebRTC after the user approves the pairing request in the Windows terminal.
 
-**Current phase: read-only H.264 screen preview, not a finished remote-desktop product.** Windows uses the OpenH264 software encoder with a target of about 15 FPS and a 1280×720 cap. Mouse, keyboard, clipboard and file transfer are disabled. This build intentionally uses STUN only and has no TURN relay or TURN credentials. Direct WebRTC may fail on networks whose NAT/firewall prevents peer-to-peer traffic. Do not expose the Host health endpoint or add router port forwarding.
+**Current phase: read-only H.264 screen preview, not a finished remote-desktop product.** Windows uses the OpenH264 software encoder configured for up to 60 FPS at a 1280×720 cap; measured FPS depends on CPU, capture speed, and network. Mouse, keyboard, clipboard and file transfer are disabled. This build intentionally uses STUN only and has no TURN relay or TURN credentials. Direct WebRTC may fail on networks whose NAT/firewall prevents peer-to-peer traffic. Do not expose the Host health endpoint or add router port forwarding.
 
 ## Project structure
 

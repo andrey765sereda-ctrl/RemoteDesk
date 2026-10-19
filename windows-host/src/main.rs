@@ -7,7 +7,11 @@ use axum::{
     Json, Router,
 };
 use bytes::Bytes;
-use openh264::{encoder::Encoder, formats::RgbSliceU8};
+use openh264::{
+    OpenH264API,
+    encoder::{BitRate, Complexity, Encoder, EncoderConfig, FrameRate, Level, RateControlMode, UsageType},
+    formats::{RgbSliceU8, YUVBuffer},
+};
 use screenshots::{Screen, image::{DynamicImage, imageops::{self, FilterType}}};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -27,7 +31,8 @@ use webrtc::{
 };
 
 const SIGNAL_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const SCREEN_FRAME_INTERVAL: Duration = Duration::from_millis(67);
+const TARGET_FPS: u64 = 60;
+const SCREEN_FRAME_INTERVAL: Duration = Duration::from_micros(1_000_000 / TARGET_FPS);
 const STREAM_STATS_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_SCREEN_WIDTH: u32 = 1280;
 const MAX_SCREEN_HEIGHT: u32 = 720;
@@ -275,7 +280,7 @@ async fn run_screen_stream(client: &reqwest::Client, api_base: &str, session_id:
         ..Default::default()
     };
     println!("WebRTC network mode: direct connection with STUN only; TURN is disabled.");
-    println!("Video codec: H.264 / OpenH264 software encoder, target 15 FPS, maximum 1280x720.");
+    println!("Video codec: H.264 / OpenH264 software encoder, target up to 60 FPS, maximum 1280x720. Actual FPS is measured below.");
 
     let peer_connection = std::sync::Arc::new(
         api.new_peer_connection(config).await.context("create WebRTC peer connection")?
@@ -374,10 +379,20 @@ async fn run_screen_stream(client: &reqwest::Client, api_base: &str, session_id:
 
     let screens = Screen::all().context("enumerate displays for screen capture")?;
     let screen = screens.into_iter().next().ok_or_else(|| anyhow!("Windows reported no capturable display"))?;
-    let mut encoder = Encoder::new().map_err(|error| anyhow!("initialize OpenH264 encoder: {error}"))?;
+    let encoder_config = EncoderConfig::new()
+        .usage_type(UsageType::ScreenContentRealTime)
+        .max_frame_rate(FrameRate::from_hz(TARGET_FPS as f32))
+        .bitrate(BitRate::from_bps(6_000_000))
+        .complexity(Complexity::Low)
+        .rate_control_mode(RateControlMode::Bitrate)
+        .level(Level::Level_4_0)
+        .num_threads(0)
+        .skip_frames(true);
+    let mut encoder = Encoder::with_api_config(OpenH264API::from_source(), encoder_config)
+        .map_err(|error| anyhow!("initialize OpenH264 real-time encoder: {error}"))?;
 
     println!("H.264 screen preview connected. Sending encoded RTP video (read-only). Press Ctrl+C to stop.");
-    println!("Video size is capped at 1280x720; target frame rate is about 15 FPS. Encoder is software-based in this build.");
+    println!("Target is 60 FPS at up to 1280x720 with low-complexity software H.264 (6 Mbps). Actual FPS depends on Windows capture and CPU; no 60 FPS guarantee.");
 
     let mut stats_started = Instant::now();
     let mut stats_frames: u64 = 0;
@@ -394,8 +409,11 @@ async fn run_screen_stream(client: &reqwest::Client, api_base: &str, session_id:
 
         let encode_started = Instant::now();
         let rgb_source = RgbSliceU8::new(&rgb, (width, height));
+        // openh264 0.9.x Encoder::encode accepts YUVSource, not RGB sources.
+        // Convert the captured RGB frame to YUV 4:2:0 before encoding H.264.
+        let yuv_frame = YUVBuffer::from_rgb_source(rgb_source);
         let encoded = encoder
-            .encode(&rgb_source)
+            .encode(&yuv_frame)
             .map_err(|error| anyhow!("H.264 encode failed: {error}"))?
             .to_vec();
         let encode_elapsed = encode_started.elapsed();

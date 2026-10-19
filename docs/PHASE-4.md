@@ -46,7 +46,7 @@ The Host logs every five seconds:
 
 `H.264 performance: <fps> FPS | avg frame <KiB> | capture <ms> | encode <ms> | send <ms>`
 
-This build uses a software encoder and targets about 15 FPS, capped at 1280×720. Actual FPS depends on screen capture cost, CPU, network, and WebRTC packet loss. H.264 reduces bandwidth significantly for typical desktop changes; it does not guarantee hardware encoding or 15 FPS on every PC.
+This build uses a software encoder configured for up to 60 FPS at a maximum 1280×720 and a 6 Mbps target bitrate. The program reports measured FPS every five seconds. A software encoder plus full-screen capture may not sustain 60 FPS on every PC; achieving stable 60 FPS may require Windows hardware encoding and a more efficient Windows Graphics Capture pipeline. H.264 can reduce bandwidth versus JPEG frames, but it does not guarantee a particular frame rate.
 
 ## Limits
 
