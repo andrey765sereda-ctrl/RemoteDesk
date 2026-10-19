@@ -43,13 +43,13 @@ In Tailscale Admin Console, enable HTTPS certificates for your tailnet if they a
 
 Copy the `https://<machine>.<tailnet>.ts.net` URL shown by `tailscale serve status`. The URL you enter on the RemoteDesk page should be:
 
-`https://<machine>.<tailnet>.ts.net/remotedesk`
+`https://flygribbpc.tail28d1f0.ts.net/remotedesk` (уже предзаполнен в текущем веб-клиенте)
 
 The iPhone must have Tailscale installed and connected to the same tailnet for this private HTTPS URL and the advertised UDP candidate to work. This works while the iPhone is on cellular data; no direct public exposure of MediaMTX is needed. Tailscale may use its encrypted relay when a direct path is unavailable.
 
 ## 3. Show video on the RemoteDesk site
 
-Open the GitHub Pages RemoteDesk site, paste the HTTPS URL above into “HTTPS-адрес MediaMTX” and press “Показать видео здесь”. The viewer is embedded on the page; no second tab is opened. To stop it, press “Остановить видео”.
+Open the GitHub Pages RemoteDesk site. The HTTPS URL `https://flygribbpc.tail28d1f0.ts.net/remotedesk` is pre-filled, and the player starts inside the page automatically. No second tab is opened. To stop it, press “Остановить видео”. If Tailscale is disconnected on the iPhone, connect it and press “Остановить видео” then “Показать видео здесь”.
 
 If the iframe page loads but the video stays black, check:
 

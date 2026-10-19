@@ -22,7 +22,7 @@ RemoteDesk is a personal Windows 11 remote-desktop project with owner-approved i
 
 ## Mobile internet and inline video
 
-Follow `docs/MOBILE-INTERNET.md`. In brief: install Tailscale on Windows and iPhone; configure MediaMTX to advertise the Host's Tailscale IP for WebRTC; expose only the MediaMTX web/player endpoint to the tailnet with `tailscale serve --bg --https=443 http://127.0.0.1:8889`; enter the resulting `https://<machine>.<tailnet>.ts.net/remotedesk` URL in the page. Keep Tailscale connected on the iPhone on cellular data. Do not public-port-forward MediaMTX.
+Follow `docs/MOBILE-INTERNET.md`. In brief: install Tailscale on Windows and iPhone; configure MediaMTX to advertise the Host's Tailscale IP for WebRTC; expose only the MediaMTX web/player endpoint to the tailnet with `tailscale serve --bg --https=443 http://127.0.0.1:8889`; the current preconfigured viewer URL is `https://flygribbpc.tail28d1f0.ts.net/remotedesk` (it is pre-filled and the inline player starts automatically). Keep Tailscale connected on the iPhone on cellular data. Do not public-port-forward MediaMTX.
 
 ## Deploy/update
 

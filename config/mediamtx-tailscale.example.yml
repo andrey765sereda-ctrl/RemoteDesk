@@ -1,5 +1,5 @@
 # Copy these settings into the MediaMTX config (mediamtx.yml).
-# Replace 100.64.1.2 with the actual IPv4 address returned by `tailscale ip -4` on Windows.
+# Configured for this Windows host: `tailscale ip -4` returned 100.95.87.21.
 # Keep the OBS WHIP path configured as `remotedesk`.
 webrtc: true
 webrtcAddress: :8889
@@ -7,7 +7,7 @@ webrtcLocalUDPAddress: :8189
 webrtcLocalTCPAddress: ""
 webrtcIPsFromInterfaces: false
 webrtcAdditionalHosts:
-  - 100.64.1.2
+  - 100.95.87.21
 
 # Do not expose the MediaMTX management API publicly. The web viewer can be reached
 # through Tailscale Serve over HTTPS; media ICE must additionally advertise the Tailscale IP.
