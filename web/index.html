@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111318">
+  <meta name="description" content="RemoteDesk — управление своим Windows-компьютером с iPhone.">
+  <title>RemoteDesk</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="brand-mark" aria-hidden="true">RD</div>
+      <div class="brand-copy"><h1>RemoteDesk</h1><p>Удалённый рабочий стол</p></div>
+      <span class="phase-tag">PHASE 1</span>
+    </header>
+
+    <section class="hero card">
+      <div class="eyebrow"><span class="status-dot"></span> ПРОТОТИП ИНФРАСТРУКТУРЫ</div>
+      <h2>Твой компьютер.<br><span>На твоём iPhone.</span></h2>
+      <p class="muted">Сейчас проверяем доступность API. Передача экрана и управление мышью появятся на следующих этапах.</p>
+      <div class="status-line"><span id="status-indicator" class="status-indicator idle"></span><span id="status-text">Не проверено</span></div>
+      <button id="check-button" class="primary-button" type="button">Проверить API</button>
+    </section>
+
+    <section class="card form-card">
+      <div class="section-heading"><div><p class="eyebrow">ПОДКЛЮЧЕНИЕ</p><h3>Адрес API</h3></div><span class="step-number">01</span></div>
+      <label for="api-url">Cloudflare Worker URL</label>
+      <input id="api-url" type="url" inputmode="url" placeholder="https://remotedesk-api.example.workers.dev" autocomplete="url">
+      <p class="helper">Вставь URL после публикации Worker. Значение сохраняется только в памяти текущей страницы.</p>
+      <button id="save-url" class="secondary-button" type="button">Применить адрес</button>
+    </section>
+
+    <section class="card info-card">
+      <div class="section-heading"><div><p class="eyebrow">СЛЕДУЮЩИЕ ЭТАПЫ</p><h3>Состояние проекта</h3></div><span class="step-number">02</span></div>
+      <ul class="feature-list">
+        <li class="done"><span class="feature-icon">✓</span><div><strong>Веб-интерфейс</strong><small>Адаптирован для экрана iPhone</small></div></li>
+        <li class="current"><span class="feature-icon">•</span><div><strong>API и Windows Host</strong><small>Проверка связи без удалённого управления</small></div></li>
+        <li><span class="feature-icon">3</span><div><strong>Безопасное сопряжение</strong><small>Привязка устройств и временные разрешения</small></div></li>
+        <li><span class="feature-icon">4</span><div><strong>Трансляция экрана</strong><small>WebRTC и аппаратное кодирование</small></div></li>
+      </ul>
+    </section>
+
+    <footer><p>RemoteDesk · локальная разработка</p><p class="footer-note">Этот прототип не управляет компьютером и не открывает доступ к нему из интернета.</p></footer>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </main>
+  <script src="./app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+name = "remotedesk-api"
+main = "src/index.ts"
+compatibility_date = "2026-10-19"
+workers_dev = true
+
+[vars]
+APP_ENV = "development"
+
+# The static Pages origin can be added here after deployment. For local testing,
+# localhost origins are allowed by the Worker code. Do not add secrets to [vars].
