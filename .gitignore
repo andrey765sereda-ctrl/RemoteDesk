@@ -1,4 +1,5 @@
 # Rust build artifacts
+**/target/
 windows-host/target/
 
 # Node/Cloudflare build artifacts
@@ -15,6 +16,3 @@ worker/.wrangler/
 .vscode/
 .idea/
 .DS_Store
-# Rust build artifacts
-**/target/
-**/*.pdb

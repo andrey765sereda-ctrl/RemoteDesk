@@ -2,7 +2,7 @@
 
 RemoteDesk is an experimental Windows 11 + iPhone remote-desktop project built without requiring a Mac. The static iPhone web client is published with GitHub Pages. Cloudflare Workers + a Durable Object coordinate one-time pairing and WebRTC signaling. A Rust Host on Windows captures the desktop and sends low-rate JPEG frames over a WebRTC DataChannel after the user approves the pairing request in the Windows terminal.
 
-**This phase is a read-only screen preview, not a finished remote-desktop product.** It sends small JPEG snapshots (about 1–2 frames per second depending on the PC and network), not H.264 video. Mouse, keyboard, clipboard and file transfer are disabled. There is no TURN relay configured yet, so some networks will not allow a direct WebRTC connection. Do not expose the Host health endpoint or add router port forwarding.
+**This phase is a read-only screen preview, not a finished remote-desktop product.** It sends small JPEG snapshots (about 1–2 frames per second depending on the PC and network), not H.264 video. Mouse, keyboard, clipboard and file transfer are disabled. This build intentionally uses STUN only and has no TURN relay or TURN credentials. Direct WebRTC may fail on networks whose NAT/firewall prevents peer-to-peer traffic. Do not expose the Host health endpoint or add router port forwarding.
 
 ## Project structure
 
@@ -83,6 +83,6 @@ See `docs/PHASE-3.md` for protocol notes and known limitations.
 - The Worker passes SDP signaling only and does not relay screen frames. SDP is accepted only on an approved session and size-limited.
 - The Host's local `/health` endpoint is bound to `127.0.0.1:47831` and cannot run commands.
 - This phase sends no remote input. CORS is a browser boundary, not authentication; session secrets and approval are the actual checks.
-- Do not configure router port forwarding. Add TURN support before relying on remote access across arbitrary networks.
+- Do not configure router port forwarding. This STUN-only build cannot guarantee connections across every mobile/Wi-Fi network; if direct ICE fails, the session will not connect.
 
 The current code has not been compiled on the target Windows computer from this environment. Run `cargo run` and `npm.cmd run typecheck` locally and report any errors before proceeding to mouse/keyboard input or performance work.

@@ -92,37 +92,6 @@ struct SignalResponse {
     description: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IceServersResponse {
-    ice_servers: Vec<RemoteIceServer>,
-}
-
-#[derive(Deserialize)]
-struct RemoteIceServer {
-    urls: RemoteIceUrls,
-    #[serde(default)]
-    username: String,
-    #[serde(default)]
-    credential: String,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RemoteIceUrls {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl RemoteIceUrls {
-    fn into_vec(self) -> Vec<String> {
-        match self {
-            Self::One(url) => vec![url],
-            Self::Many(urls) => urls,
-        }
-    }
-}
-
 fn summarize_candidates(sdp: &str) -> String {
     let (mut host, mut srflx, mut relay, mut prflx) = (0usize, 0usize, 0usize, 0usize);
     for line in sdp.lines().filter(|line| line.starts_with("a=candidate:")) {
@@ -285,55 +254,19 @@ async fn pairing_loop() {
     }
 }
 
-async fn load_ice_servers(client: &reqwest::Client, api_base: &str, session_id: &str, host_secret: &str) -> Vec<RTCIceServer> {
-    let fallback = || vec![RTCIceServer {
-        urls: vec!["stun:stun.l.google.com:19302".to_string()],
+fn direct_ice_servers() -> Vec<RTCIceServer> {
+    // STUN only: no TURN relay or relay credentials are used in this build.
+    vec![RTCIceServer {
+        urls: vec!["stun:stun.cloudflare.com:3478".to_string()],
         ..Default::default()
-    }];
-    let response = match post_json(
-        client,
-        &format!("{api_base}/api/rtc/ice-servers"),
-        &HostAuthRequest { session_id, host_secret },
-    ).await {
-        Ok(response) => response,
-        Err(error) => {
-            eprintln!("Could not request TURN credentials ({error}); falling back to STUN only. Remote networks may fail.");
-            return fallback();
-        }
-    };
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        eprintln!("TURN credentials unavailable (HTTP {status}: {body}); falling back to STUN only. Set TURN_KEY_ID and TURN_API_TOKEN in Cloudflare for relay support.");
-        return fallback();
-    }
-    match response.json::<IceServersResponse>().await {
-        Ok(data) if !data.ice_servers.is_empty() => {
-            let servers = data.ice_servers.into_iter().map(|server| RTCIceServer {
-                urls: server.urls.into_vec(),
-                username: server.username,
-                credential: server.credential,
-                ..Default::default()
-            }).collect::<Vec<_>>();
-            println!("Loaded {} STUN/TURN server entries from Cloudflare.", servers.len());
-            servers
-        }
-        Ok(_) => {
-            eprintln!("Cloudflare returned an empty ICE server list; falling back to STUN only.");
-            fallback()
-        }
-        Err(error) => {
-            eprintln!("Could not parse Cloudflare ICE server list ({error}); falling back to STUN only.");
-            fallback()
-        }
-    }
+    }]
 }
-
 async fn run_screen_stream(client: &reqwest::Client, api_base: &str, session_id: &str, host_secret: &str) -> Result<()> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs().context("register WebRTC codecs")?;
     let api = APIBuilder::new().with_media_engine(media_engine).build();
-    let ice_servers = load_ice_servers(client, api_base, session_id, host_secret).await;
+    let ice_servers = direct_ice_servers();
+    println!("WebRTC network mode: direct connection with STUN only; TURN is disabled.");
     let config = RTCConfiguration {
         ice_servers,
         ..Default::default()

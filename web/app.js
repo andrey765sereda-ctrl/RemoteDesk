@@ -221,19 +221,12 @@
     disconnectScreen(false);
     setScreenStatus('waiting', 'Создаём защищённое WebRTC-соединение…');
     disconnectButton.disabled = true;
-    let rtcConfiguration = { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] };
-    try {
-      setScreenStatus('waiting', 'Запрашиваем временные STUN/TURN-настройки…');
-      const iceConfig = await postApi('/api/rtc/ice-servers', { sessionId, clientToken });
-      if (Array.isArray(iceConfig.iceServers) && iceConfig.iceServers.length > 0) {
-        rtcConfiguration = { iceServers: iceConfig.iceServers };
-        setScreenStatus('waiting', 'STUN/TURN настроены. Создаём WebRTC-соединение…');
-      } else {
-        setScreenStatus('waiting', 'Список STUN/TURN пуст. Пробуем прямое STUN-соединение…');
-      }
-    } catch (error) {
-      setScreenStatus('waiting', `TURN недоступен (${error.message}). Пробуем STUN; мобильная сеть может не пройти.`);
-    }
+    // STUN-only direct P2P mode. No TURN relay and no TURN credentials are used.
+    const rtcConfiguration = {
+      iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }],
+      iceTransportPolicy: 'all'
+    };
+    setScreenStatus('waiting', 'Режим STUN-only: пытаемся установить прямое WebRTC-соединение без ретранслятора…');
     const pc = new RTCPeerConnection(rtcConfiguration);
     activePeerConnection = pc;
     let firstFrameResolve;
@@ -252,7 +245,7 @@
       if (state === 'connecting') setScreenStatus('waiting', 'Соединяем устройства…');
       if (state === 'connected') setScreenStatus('waiting', 'Канал установлен. Ожидаем первый кадр…');
       if (state === 'failed') {
-        setScreenStatus('bad', 'WebRTC failed. Открой консоль Safari/браузера и проверь ICE; TURN может быть не настроен.');
+        setScreenStatus('bad', 'WebRTC не подключился. Включён STUN-only режим: проверь кандидаты ICE и сетевые ограничения.');
         if (firstFrameRejecter) firstFrameRejecter(new Error('WebRTC-соединение завершилось ошибкой'));
       }
       if (state === 'disconnected') setScreenStatus('waiting', 'Связь временно потеряна…');
@@ -264,7 +257,7 @@
       if (state === 'checking') setScreenStatus('waiting', 'Проверяем сетевые маршруты ICE…');
       if (state === 'connected' || state === 'completed') setScreenStatus('waiting', 'Сетевой ICE-канал установлен. Ожидаем DataChannel…');
       if (state === 'disconnected') setScreenStatus('waiting', 'ICE временно отключён. Проверяем восстановление…');
-      if (state === 'failed') setScreenStatus('bad', 'ICE failed: прямой маршрут не найден. Проверь TURN credentials и Windows Firewall.');
+      if (state === 'failed') setScreenStatus('bad', 'ICE failed: прямой маршрут не найден. TURN отключён; проверь Wi-Fi/мобильную сеть и Windows Firewall.');
     };
     pc.onicecandidateerror = event => {
       console.warn('[RemoteDesk] ICE candidate error:', event.errorCode, event.errorText, event.url);
