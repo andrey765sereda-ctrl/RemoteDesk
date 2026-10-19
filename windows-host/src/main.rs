@@ -1,43 +1,27 @@
 use anyhow::{Context, Result, anyhow};
 use axum::{
-    extract::ConnectInfo,
     http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
-use bytes::Bytes;
-use openh264::{
-    OpenH264API,
-    encoder::{BitRate, Complexity, Encoder, EncoderConfig, FrameRate, Level, RateControlMode, UsageType},
-    formats::{RgbSliceU8, YUVBuffer},
-};
-use screenshots::{Screen, image::{DynamicImage, imageops::{self, FilterType}}};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::{
     io::{self, Write},
     net::SocketAddr,
-    time::{Duration, Instant},
+    sync::mpsc::{self, Receiver},
+    time::Duration,
 };
 use tokio::net::TcpListener;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
-use webrtc::{
-    api::{media_engine::{MediaEngine, MIME_TYPE_H264}, APIBuilder},
-    media::Sample,
-    ice_transport::ice_server::RTCIceServer,
-    peer_connection::{configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState, sdp::session_description::RTCSessionDescription},
-    rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
-    track::track_local::{TrackLocal, track_local_static_sample::TrackLocalStaticSample},
-};
 
 const SIGNAL_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const TARGET_FPS: u64 = 60;
-const SCREEN_FRAME_INTERVAL: Duration = Duration::from_micros(1_000_000 / TARGET_FPS);
-const STREAM_STATS_INTERVAL: Duration = Duration::from_secs(5);
-const MAX_SCREEN_WIDTH: u32 = 1280;
-const MAX_SCREEN_HEIGHT: u32 = 720;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct HealthResponse {
     app: &'static str,
     status: &'static str,
@@ -46,13 +30,13 @@ struct HealthResponse {
     remote_control_enabled: bool,
 }
 
-async fn health(ConnectInfo(_peer): ConnectInfo<SocketAddr>) -> impl IntoResponse {
+async fn health() -> impl IntoResponse {
     Json(HealthResponse {
         app: "RemoteDesk Host",
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
-        capabilities: ["health-check", "temporary-pairing", "webrtc-screen-preview"],
-        remote_control_enabled: false,
+        capabilities: ["health-check", "temporary-pairing", "remote-input-websocket"],
+        remote_control_enabled: true,
     })
 }
 
@@ -83,34 +67,9 @@ struct DecisionRequest<'a> {
     approve: bool,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HostSignalRequest<'a> {
-    session_id: &'a str,
-    host_secret: &'a str,
-    description: &'a str,
-}
-
 #[derive(Deserialize)]
 struct StatusResponse {
     status: String,
-}
-
-#[derive(Deserialize)]
-struct SignalResponse {
-    status: String,
-    description: Option<String>,
-}
-
-fn summarize_candidates(sdp: &str) -> String {
-    let (mut host, mut srflx, mut relay, mut prflx) = (0usize, 0usize, 0usize, 0usize);
-    for line in sdp.lines().filter(|line| line.starts_with("a=candidate:")) {
-        if line.contains(" typ host") { host += 1; }
-        else if line.contains(" typ srflx") { srflx += 1; }
-        else if line.contains(" typ relay") { relay += 1; }
-        else if line.contains(" typ prflx") { prflx += 1; }
-    }
-    format!("host={host}, srflx={srflx}, relay={relay}, prflx={prflx}")
 }
 
 fn make_pairing_values() -> (String, String, String) {
@@ -136,11 +95,10 @@ async fn pairing_loop() {
     let api_base = match std::env::var("REMOTEDESK_API_URL") {
         Ok(value) if !value.trim().is_empty() => value.trim().trim_end_matches('/').to_string(),
         _ => {
-            println!("Cloudflare pairing: disabled. Set REMOTEDESK_API_URL to enable temporary pairing.");
+            println!("Remote control pairing disabled. Set REMOTEDESK_API_URL to the HTTPS Cloudflare Worker URL.");
             return;
         }
     };
-
     match reqwest::Url::parse(&api_base) {
         Ok(url) if url.scheme() == "https" => {}
         _ => {
@@ -150,10 +108,7 @@ async fn pairing_loop() {
     }
     let client = match reqwest::Client::builder().timeout(Duration::from_secs(20)).build() {
         Ok(value) => value,
-        Err(error) => {
-            eprintln!("Pairing client initialization failed: {error}");
-            return;
-        }
+        Err(error) => { eprintln!("Pairing client initialization failed: {error}"); return; }
     };
 
     let (session_id, host_secret, pair_code) = make_pairing_values();
@@ -162,11 +117,11 @@ async fn pairing_loop() {
         host_secret: &host_secret,
         pair_code: &pair_code,
     };
-
     match post_json(&client, &format!("{api_base}/api/pairing/start"), &start).await {
         Ok(response) if response.status().is_success() => {
-            println!("\nTemporary pairing is ready (expires in 5 minutes).\nOpen the RemoteDesk website on your iPhone and enter this code:\n  {}", format_pair_code(&pair_code));
-            println!("Keep this terminal open. The screen is not shared until you approve a pairing request.");
+            println!("\nRemoteDesk Host v{}", env!("CARGO_PKG_VERSION"));
+            println!("Temporary pairing is ready (expires in 5 minutes).\nEnter this code on your RemoteDesk website:\n  {}", format_pair_code(&pair_code));
+            println!("Approve every pairing request only if you initiated it. After approval, the Host will accept mouse and keyboard commands through an authenticated outbound WebSocket.");
         }
         Ok(response) => {
             let status = response.status();
@@ -174,38 +129,28 @@ async fn pairing_loop() {
             eprintln!("Could not start pairing (HTTP {status}): {body}");
             return;
         }
-        Err(error) => {
-            eprintln!("Could not reach RemoteDesk API: {error}");
-            return;
-        }
+        Err(error) => { eprintln!("Could not reach RemoteDesk API: {error}"); return; }
     }
 
     loop {
         tokio::time::sleep(SIGNAL_POLL_INTERVAL).await;
-        let status_response = post_json(
+        let response = match post_json(
             &client,
             &format!("{api_base}/api/pairing/host-status"),
             &HostAuthRequest { session_id: &session_id, host_secret: &host_secret },
-        ).await;
-
-        let status: StatusResponse = match status_response {
-            Ok(response) if response.status().is_success() => match response.json().await {
-                Ok(value) => value,
-                Err(error) => {
-                    eprintln!("Invalid pairing status response: {error}");
-                    return;
-                }
-            },
+        ).await {
+            Ok(response) if response.status().is_success() => response,
             Ok(response) => {
                 let code = response.status();
                 let body = response.text().await.unwrap_or_default();
                 eprintln!("Pairing status request failed (HTTP {code}): {body}");
                 return;
             }
-            Err(error) => {
-                eprintln!("Connection to RemoteDesk API failed: {error}");
-                return;
-            }
+            Err(error) => { eprintln!("Connection to RemoteDesk API failed: {error}"); return; }
+        };
+        let status: StatusResponse = match response.json().await {
+            Ok(value) => value,
+            Err(error) => { eprintln!("Invalid pairing status response: {error}"); return; }
         };
 
         match status.status.as_str() {
@@ -213,7 +158,7 @@ async fn pairing_loop() {
             "pending" => {
                 println!("\nA device entered the pairing code.");
                 let answer = tokio::task::spawn_blocking(|| -> io::Result<bool> {
-                    print!("Approve this device pairing? [y/N]: ");
+                    print!("Approve this device pairing and enable remote input? [y/N]: ");
                     io::stdout().flush()?;
                     let mut line = String::new();
                     io::stdin().read_line(&mut line)?;
@@ -224,7 +169,6 @@ async fn pairing_loop() {
                     Ok(Err(error)) => { eprintln!("Could not read approval response: {error}"); false }
                     Err(error) => { eprintln!("Approval task failed: {error}"); false }
                 };
-
                 match post_json(
                     &client,
                     &format!("{api_base}/api/pairing/decision"),
@@ -232,10 +176,9 @@ async fn pairing_loop() {
                 ).await {
                     Ok(response) if response.status().is_success() => {
                         if approve {
-                            println!("Pairing approved. Negotiating a peer-to-peer WebRTC connection…");
-                            println!("Only a read-only screen preview is enabled in this phase; mouse and keyboard input remain disabled.");
-                            if let Err(error) = run_screen_stream(&client, &api_base, &session_id, &host_secret).await {
-                                eprintln!("Screen preview stopped: {error:#}");
+                            println!("Pairing approved. Connecting authenticated remote-control channel…");
+                            if let Err(error) = run_control_socket(&api_base, &session_id, &host_secret).await {
+                                eprintln!("Remote-control channel stopped: {error:#}");
                             }
                         } else {
                             println!("Pairing request rejected.");
@@ -251,9 +194,9 @@ async fn pairing_loop() {
                 return;
             }
             "approved" => {
-                println!("Pairing was approved. Starting read-only screen preview…");
-                if let Err(error) = run_screen_stream(&client, &api_base, &session_id, &host_secret).await {
-                    eprintln!("Screen preview stopped: {error:#}");
+                println!("Pairing is approved. Connecting remote-control channel…");
+                if let Err(error) = run_control_socket(&api_base, &session_id, &host_secret).await {
+                    eprintln!("Remote-control channel stopped: {error:#}");
                 }
                 return;
             }
@@ -264,225 +207,285 @@ async fn pairing_loop() {
     }
 }
 
-fn direct_ice_servers() -> Vec<RTCIceServer> {
-    // STUN only: no TURN relay or relay credentials are used in this build.
-    vec![RTCIceServer {
-        urls: vec!["stun:stun.cloudflare.com:3478".to_string()],
-        ..Default::default()
-    }]
+fn control_socket_url(api_base: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(api_base).context("parse Worker URL")?;
+    url.set_scheme("wss").map_err(|_| anyhow!("could not switch Worker URL to WSS"))?;
+    url.set_path("/api/control/socket");
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
 }
-async fn run_screen_stream(client: &reqwest::Client, api_base: &str, session_id: &str, host_secret: &str) -> Result<()> {
-    let mut media_engine = MediaEngine::default();
-    media_engine.register_default_codecs().context("register WebRTC codecs")?;
-    let api = APIBuilder::new().with_media_engine(media_engine).build();
-    let config = RTCConfiguration {
-        ice_servers: direct_ice_servers(),
-        ..Default::default()
-    };
-    println!("WebRTC network mode: direct connection with STUN only; TURN is disabled.");
-    println!("Video codec: H.264 / OpenH264 software encoder, target up to 60 FPS, maximum 1280x720. Actual FPS is measured below.");
 
-    let peer_connection = std::sync::Arc::new(
-        api.new_peer_connection(config).await.context("create WebRTC peer connection")?
-    );
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+enum ControlCommand {
+    Move { dx: i32, dy: i32 },
+    Click { button: String },
+    ButtonDown { button: String },
+    ButtonUp { button: String },
+    Wheel { #[serde(rename = "deltaY")] delta_y: i32 },
+    Key { key: String, phase: String },
+    Text { text: String },
+    ReleaseAll,
+}
 
-    // Send an actual H.264 RTP video track instead of individual JPEG frames over a data channel.
-    let video_track = std::sync::Arc::new(TrackLocalStaticSample::new(
-        RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_H264.to_owned(),
-            ..Default::default()
-        },
-        "screen-video".to_owned(),
-        "remotedesk".to_owned(),
-    ));
-    let rtp_sender = peer_connection
-        .add_track(std::sync::Arc::clone(&video_track) as std::sync::Arc<dyn TrackLocal + Send + Sync>)
-        .await
-        .context("add H.264 video track")?;
+fn validate_command(command: ControlCommand) -> Result<ControlCommand> {
+    match &command {
+        ControlCommand::Move { dx, dy } if *dx < -180 || *dx > 180 || *dy < -180 || *dy > 180 => return Err(anyhow!("mouse movement exceeds per-message limit")),
+        ControlCommand::Click { button } | ControlCommand::ButtonDown { button } | ControlCommand::ButtonUp { button }
+            if !matches!(button.as_str(), "left" | "right" | "middle") => return Err(anyhow!("invalid mouse button")),
+        ControlCommand::Wheel { delta_y } if *delta_y < -120 || *delta_y > 120 => return Err(anyhow!("scroll movement exceeds per-message limit")),
+        ControlCommand::Key { key, phase } if key.len() > 16 || !matches!(phase.as_str(), "down" | "up" | "click") => return Err(anyhow!("invalid key command")),
+        ControlCommand::Text { text } if text.chars().count() > 500 || text.contains('\0') => return Err(anyhow!("text length exceeds limit")),
+        _ => {}
+    }
+    Ok(command)
+}
 
-    // Drain incoming RTCP feedback so the sender's RTCP reader does not remain blocked.
-    tokio::spawn(async move {
-        let mut rtcp_buffer = vec![0_u8; 1500];
-        while let Ok((_size, _attributes)) = rtp_sender.read(&mut rtcp_buffer).await {}
+async fn run_control_socket(api_base: &str, session_id: &str, host_secret: &str) -> Result<()> {
+    let url = control_socket_url(api_base)?;
+    println!("Opening outbound secure control connection to Cloudflare Worker…");
+    let (mut socket, response) = connect_async(url.as_str()).await.context("connect WebSocket to Worker")?;
+    println!("Control WebSocket handshake: HTTP {}", response.status());
+    let auth = json!({
+        "type": "auth",
+        "role": "host",
+        "sessionId": session_id,
+        "hostSecret": host_secret
     });
+    socket.send(Message::Text(auth.to_string().into())).await.context("send Host WebSocket authentication")?;
 
-    let (state_tx, mut state_rx) = tokio::sync::mpsc::channel::<RTCPeerConnectionState>(8);
-    peer_connection.on_peer_connection_state_change(Box::new(move |state| {
-        println!("WebRTC peer connection state: {state}");
-        let _ = state_tx.try_send(state);
-        Box::pin(async {})
-    }));
-
-    let offer = peer_connection.create_offer(None).await.context("create WebRTC offer")?;
-    let mut gather_complete = peer_connection.gathering_complete_promise().await;
-    peer_connection.set_local_description(offer).await.context("set local WebRTC offer")?;
-    let _ = tokio::time::timeout(Duration::from_secs(25), gather_complete.recv()).await
-        .context("timed out gathering ICE candidates")?;
-    let local_description = peer_connection.local_description().await.ok_or_else(|| anyhow!("WebRTC offer was not created"))?;
-    println!("Local ICE candidates: {}", summarize_candidates(&local_description.sdp));
-    let description_json = serde_json::to_string(&local_description).context("serialize WebRTC offer")?;
-    let offer_request = HostSignalRequest { session_id, host_secret, description: &description_json };
-    let response = post_json(client, &format!("{api_base}/api/rtc/host-offer"), &offer_request).await
-        .context("send WebRTC offer to Cloudflare")?;
-    if !response.status().is_success() {
-        let code = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(anyhow!("Cloudflare rejected WebRTC offer (HTTP {code}): {body}"));
-    }
-    println!("WebRTC offer published. Waiting for the iPhone answer…");
-
-    let answer_deadline = tokio::time::Instant::now() + Duration::from_secs(180);
-    let answer_description = loop {
-        if tokio::time::Instant::now() >= answer_deadline {
-            return Err(anyhow!("timed out waiting for iPhone WebRTC answer"));
-        }
-        tokio::time::sleep(SIGNAL_POLL_INTERVAL).await;
-        let response = post_json(
-            client,
-            &format!("{api_base}/api/rtc/host-answer"),
-            &HostAuthRequest { session_id, host_secret },
-        ).await.context("poll WebRTC answer")?;
-        if !response.status().is_success() {
-            let code = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Cloudflare answer polling failed (HTTP {code}): {body}"));
-        }
-        let state: SignalResponse = response.json().await.context("parse WebRTC answer state")?;
-        if state.status == "ready" {
-            break state.description.ok_or_else(|| anyhow!("Cloudflare returned ready without an answer"))?;
-        }
-        if state.status == "expired" || state.status == "rejected" {
-            return Err(anyhow!("pairing session ended with status {}", state.status));
-        }
-    };
-
-    let answer: RTCSessionDescription = serde_json::from_str(&answer_description).context("parse iPhone WebRTC answer")?;
-    println!("iPhone ICE candidates: {}", summarize_candidates(&answer.sdp));
-    if !answer.sdp.to_ascii_lowercase().contains("h264") {
-        return Err(anyhow!("the iPhone WebRTC answer did not negotiate H.264; check browser codec support"));
-    }
-    peer_connection.set_remote_description(answer).await.context("apply iPhone WebRTC answer")?;
-    println!("WebRTC answer applied. Waiting for the H.264 media transport to connect…");
-
-    let connection_result = tokio::time::timeout(Duration::from_secs(45), async {
-        loop {
-            match state_rx.recv().await {
-                Some(RTCPeerConnectionState::Connected) => return Ok(()),
-                Some(RTCPeerConnectionState::Failed) => return Err(anyhow!("WebRTC peer connection failed before video could start")),
-                Some(RTCPeerConnectionState::Closed) => return Err(anyhow!("WebRTC peer connection closed before video could start")),
-                Some(_) => {}
-                None => return Err(anyhow!("WebRTC state observer closed")),
+    let auth_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let next = tokio::time::timeout_at(auth_deadline, socket.next()).await
+            .context("timed out authenticating control WebSocket")?;
+        match next {
+            Some(Ok(Message::Text(text))) => {
+                let value: Value = serde_json::from_str(text.as_str()).context("parse control authentication response")?;
+                match value.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "auth_ok" => break,
+                    "error" => return Err(anyhow!("Worker rejected control authentication: {}", value.get("message").and_then(Value::as_str).unwrap_or("unknown error"))),
+                    _ => {}
+                }
             }
+            Some(Ok(Message::Ping(payload))) => { socket.send(Message::Pong(payload)).await?; }
+            Some(Ok(Message::Close(frame))) => return Err(anyhow!("Worker closed control socket during authentication: {frame:?}")),
+            Some(Ok(_)) => {}
+            Some(Err(error)) => return Err(anyhow!("control WebSocket authentication failed: {error}")),
+            None => return Err(anyhow!("control WebSocket closed during authentication")),
         }
-    }).await.context("timed out waiting for WebRTC media transport to connect")?;
-    connection_result?;
+    }
+    println!("Remote-control channel authenticated. Waiting for iPhone commands. Press Ctrl+C to stop Host.");
 
-    let screens = Screen::all().context("enumerate displays for screen capture")?;
-    let screen = screens.into_iter().next().ok_or_else(|| anyhow!("Windows reported no capturable display"))?;
-    let encoder_config = EncoderConfig::new()
-        .usage_type(UsageType::ScreenContentRealTime)
-        .max_frame_rate(FrameRate::from_hz(TARGET_FPS as f32))
-        .bitrate(BitRate::from_bps(6_000_000))
-        .complexity(Complexity::Low)
-        .rate_control_mode(RateControlMode::Bitrate)
-        .level(Level::Level_4_0)
-        .num_threads(0)
-        .skip_frames(true);
-    let mut encoder = Encoder::with_api_config(OpenH264API::from_source(), encoder_config)
-        .map_err(|error| anyhow!("initialize OpenH264 real-time encoder: {error}"))?;
-
-    println!("H.264 screen preview connected. Sending encoded RTP video (read-only). Press Ctrl+C to stop.");
-    println!("Target is 60 FPS at up to 1280x720 with low-complexity software H.264 (6 Mbps). Actual FPS depends on Windows capture and CPU; no 60 FPS guarantee.");
-
-    let mut stats_started = Instant::now();
-    let mut stats_frames: u64 = 0;
-    let mut stats_bytes: u64 = 0;
-    let mut stats_capture_time = Duration::ZERO;
-    let mut stats_encode_time = Duration::ZERO;
-    let mut stats_send_time = Duration::ZERO;
+    let (input_tx, input_rx) = mpsc::channel::<ControlCommand>();
+    let input_thread = tokio::task::spawn_blocking(move || input_worker_loop(input_rx));
+    let (mut sink, mut stream) = socket.split();
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
+    heartbeat.tick().await;
 
     loop {
-        let cycle_started = Instant::now();
-        let capture_started = Instant::now();
-        let (rgb, width, height) = capture_screen_rgb(&screen).context("capture desktop frame")?;
-        let capture_elapsed = capture_started.elapsed();
-
-        let encode_started = Instant::now();
-        let rgb_source = RgbSliceU8::new(&rgb, (width, height));
-        // openh264 0.9.x Encoder::encode accepts YUVSource, not RGB sources.
-        // Convert the captured RGB frame to YUV 4:2:0 before encoding H.264.
-        let yuv_frame = YUVBuffer::from_rgb_source(rgb_source);
-        let encoded = encoder
-            .encode(&yuv_frame)
-            .map_err(|error| anyhow!("H.264 encode failed: {error}"))?
-            .to_vec();
-        let encode_elapsed = encode_started.elapsed();
-
-        if !encoded.is_empty() {
-            let encoded_size = encoded.len();
-            let send_started = Instant::now();
-            let sample = Sample {
-                data: Bytes::from(encoded),
-                duration: SCREEN_FRAME_INTERVAL,
-                ..Default::default()
-            };
-            video_track.write_sample(&sample).await.context("send H.264 RTP video sample")?;
-            let send_elapsed = send_started.elapsed();
-
-            stats_frames += 1;
-            stats_bytes = stats_bytes.saturating_add(encoded_size as u64);
-            stats_capture_time += capture_elapsed;
-            stats_encode_time += encode_elapsed;
-            stats_send_time += send_elapsed;
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                sink.send(Message::Text(json!({"type":"ping"}).to_string().into())).await
+                    .context("send control heartbeat")?;
+            }
+            incoming = stream.next() => {
+                let Some(incoming) = incoming else { break; };
+                match incoming.context("read control WebSocket")? {
+                    Message::Text(text) => {
+                        let value: Value = match serde_json::from_str(text.as_str()) {
+                            Ok(value) => value,
+                            Err(_) => continue,
+                        };
+                        let message_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+                        if message_type == "pong" { continue; }
+                        if message_type == "clientDisconnected" {
+                            let _ = input_tx.send(ControlCommand::ReleaseAll);
+                            println!("iPhone controller disconnected; released held mouse/keyboard inputs.");
+                            continue;
+                        }
+                        if message_type != "control" { continue; }
+                        let id = value.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                        let command_value = value.get("command").cloned().unwrap_or(Value::Null);
+                        let parsed = serde_json::from_value::<ControlCommand>(command_value)
+                            .map_err(|error| anyhow!("invalid control command: {error}"))
+                            .and_then(validate_command);
+                        match parsed {
+                            Ok(command) => {
+                                if input_tx.send(command).is_ok() {
+                                    sink.send(Message::Text(json!({"type":"ack","id":id,"ok":true,"message":"queued"}).to_string().into())).await
+                                        .context("send control acknowledgement")?;
+                                } else {
+                                    sink.send(Message::Text(json!({"type":"ack","id":id,"ok":false,"message":"input worker unavailable"}).to_string().into())).await
+                                        .context("send control acknowledgement")?;
+                                }
+                            }
+                            Err(error) => {
+                                sink.send(Message::Text(json!({"type":"ack","id":id,"ok":false,"message":error.to_string()}).to_string().into())).await
+                                    .context("send rejected command acknowledgement")?;
+                            }
+                        }
+                    }
+                    Message::Ping(payload) => { sink.send(Message::Pong(payload)).await?; }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
         }
+    }
 
-        let stats_elapsed = stats_started.elapsed();
-        if stats_elapsed >= STREAM_STATS_INTERVAL {
-            let frames = stats_frames.max(1) as f64;
-            println!(
-                "H.264 performance: {:.1} FPS | avg frame {:.1} KiB | capture {:.0} ms | encode {:.0} ms | send {:.0} ms",
-                stats_frames as f64 / stats_elapsed.as_secs_f64(),
-                stats_bytes as f64 / frames / 1024.0,
-                stats_capture_time.as_secs_f64() * 1000.0 / frames,
-                stats_encode_time.as_secs_f64() * 1000.0 / frames,
-                stats_send_time.as_secs_f64() * 1000.0 / frames,
-            );
-            stats_started = Instant::now();
-            stats_frames = 0;
-            stats_bytes = 0;
-            stats_capture_time = Duration::ZERO;
-            stats_encode_time = Duration::ZERO;
-            stats_send_time = Duration::ZERO;
-        }
+    let _ = input_tx.send(ControlCommand::ReleaseAll);
+    drop(input_tx);
+    let _ = input_thread.await;
+    println!("Control WebSocket closed; released held mouse/keyboard inputs.");
+    Ok(())
+}
 
-        let cycle_elapsed = cycle_started.elapsed();
-        if cycle_elapsed < SCREEN_FRAME_INTERVAL {
-            tokio::time::sleep(SCREEN_FRAME_INTERVAL - cycle_elapsed).await;
+#[cfg(windows)]
+fn input_worker_loop(receiver: Receiver<ControlCommand>) {
+    use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+    use std::collections::HashSet;
+
+    let mut enigo = match Enigo::new(&Settings::default()) {
+        Ok(value) => value,
+        Err(error) => { eprintln!("Could not initialize Windows input injection: {error}"); return; }
+    };
+    let mut held_keys: HashSet<String> = HashSet::new();
+    let mut held_buttons: HashSet<String> = HashSet::new();
+    while let Ok(command) = receiver.recv() {
+        if let Err(error) = apply_input_command(&mut enigo, command, &mut held_keys, &mut held_buttons) {
+            eprintln!("Input command failed: {error:#}");
         }
+    }
+    for button in held_buttons.drain() {
+        if let Some(button) = parse_button(&button) { let _ = enigo.button(button, Direction::Release); }
+    }
+    for key in held_keys.drain() {
+        if let Some(keycode) = parse_key(&key) { let _ = enigo.key(keycode, Direction::Release); }
     }
 }
 
-fn capture_screen_rgb(screen: &Screen) -> Result<(Vec<u8>, usize, usize)> {
-    let screenshot = screen.capture().context("capture display")?;
-    let (original_width, original_height) = screenshot.dimensions();
-    if original_width == 0 || original_height == 0 {
-        return Err(anyhow!("captured display has zero dimensions"));
-    }
+#[cfg(not(windows))]
+fn input_worker_loop(_receiver: Receiver<ControlCommand>) {
+    eprintln!("Remote input injection is supported only on Windows in this build.");
+}
 
-    let scale = (MAX_SCREEN_WIDTH as f32 / original_width as f32)
-        .min(MAX_SCREEN_HEIGHT as f32 / original_height as f32)
-        .min(1.0);
-    // H.264 4:2:0 input requires even dimensions.
-    let width = (((original_width as f32 * scale).round() as u32).max(2)) & !1;
-    let height = (((original_height as f32 * scale).round() as u32).max(2)) & !1;
-    let resized = imageops::resize(&screenshot, width, height, FilterType::Triangle);
-    let rgb = DynamicImage::ImageRgba8(resized).to_rgb8().into_raw();
-    Ok((rgb, width as usize, height as usize))
+#[cfg(windows)]
+fn parse_button(value: &str) -> Option<enigo::Button> {
+    match value.to_ascii_lowercase().as_str() {
+        "left" => Some(enigo::Button::Left),
+        "right" => Some(enigo::Button::Right),
+        "middle" => Some(enigo::Button::Middle),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+fn parse_key(value: &str) -> Option<enigo::Key> {
+    use enigo::Key;
+    let normalized = value.to_ascii_lowercase();
+    let key = match normalized.as_str() {
+        "control" | "ctrl" => Key::Control,
+        "alt" => Key::Alt,
+        "shift" => Key::Shift,
+        "meta" | "win" | "windows" => Key::Meta,
+        "escape" | "esc" => Key::Escape,
+        "enter" | "return" => Key::Return,
+        "backspace" => Key::Backspace,
+        "tab" => Key::Tab,
+        "space" => Key::Space,
+        "delete" => Key::Delete,
+        "home" => Key::Home,
+        "end" => Key::End,
+        "pageup" => Key::PageUp,
+        "pagedown" => Key::PageDown,
+        "arrowup" | "up" => Key::UpArrow,
+        "arrowdown" | "down" => Key::DownArrow,
+        "arrowleft" | "left" => Key::LeftArrow,
+        "arrowright" | "right" => Key::RightArrow,
+        "f1" => Key::F1, "f2" => Key::F2, "f3" => Key::F3, "f4" => Key::F4,
+        "f5" => Key::F5, "f6" => Key::F6, "f7" => Key::F7, "f8" => Key::F8,
+        "f9" => Key::F9, "f10" => Key::F10, "f11" => Key::F11, "f12" => Key::F12,
+        _ => {
+            if value.len() == 1 {
+                let ch = value.chars().next()?;
+                if ch.is_ascii_alphanumeric() {
+                    return Some(Key::Other(ch.to_ascii_uppercase() as u32));
+                }
+            }
+            return None;
+        }
+    };
+    Some(key)
+}
+
+#[cfg(windows)]
+fn apply_input_command(
+    enigo: &mut enigo::Enigo,
+    command: ControlCommand,
+    held_keys: &mut std::collections::HashSet<String>,
+    held_buttons: &mut std::collections::HashSet<String>,
+) -> Result<()> {
+    use enigo::{Axis, Coordinate, Direction, Keyboard, Mouse};
+    match command {
+        ControlCommand::Move { dx, dy } => {
+            enigo.move_mouse(dx.clamp(-180, 180), dy.clamp(-180, 180), Coordinate::Rel)
+                .map_err(|error| anyhow!(error.to_string()))?;
+        }
+        ControlCommand::Click { button } => {
+            let button = parse_button(&button).ok_or_else(|| anyhow!("invalid mouse button"))?;
+            enigo.button(button, Direction::Click).map_err(|error| anyhow!(error.to_string()))?;
+        }
+        ControlCommand::ButtonDown { button } => {
+            let normalized = button.to_ascii_lowercase();
+            let btn = parse_button(&normalized).ok_or_else(|| anyhow!("invalid mouse button"))?;
+            if held_buttons.insert(normalized) {
+                enigo.button(btn, Direction::Press).map_err(|error| anyhow!(error.to_string()))?;
+            }
+        }
+        ControlCommand::ButtonUp { button } => {
+            let normalized = button.to_ascii_lowercase();
+            let btn = parse_button(&normalized).ok_or_else(|| anyhow!("invalid mouse button"))?;
+            if held_buttons.remove(&normalized) {
+                enigo.button(btn, Direction::Release).map_err(|error| anyhow!(error.to_string()))?;
+            }
+        }
+        ControlCommand::Wheel { delta_y } => {
+            let steps = (delta_y / 30).clamp(-4, 4);
+            if steps != 0 { enigo.scroll(steps, Axis::Vertical).map_err(|error| anyhow!(error.to_string()))?; }
+        }
+        ControlCommand::Key { key, phase } => {
+            let keycode = parse_key(&key).ok_or_else(|| anyhow!("unsupported key"))?;
+            let canonical = key.to_ascii_lowercase();
+            match phase.as_str() {
+                "down" => {
+                    if held_keys.insert(canonical) { enigo.key(keycode, Direction::Press).map_err(|error| anyhow!(error.to_string()))?; }
+                }
+                "up" => {
+                    if held_keys.remove(&canonical) { enigo.key(keycode, Direction::Release).map_err(|error| anyhow!(error.to_string()))?; }
+                }
+                "click" => enigo.key(keycode, Direction::Click).map_err(|error| anyhow!(error.to_string()))?,
+                _ => return Err(anyhow!("invalid key phase")),
+            }
+        }
+        ControlCommand::Text { text } => {
+            if text.chars().count() > 500 || text.contains('\0') { return Err(anyhow!("text length exceeds limit")); }
+            enigo.text(&text).map_err(|error| anyhow!(error.to_string()))?;
+        }
+        ControlCommand::ReleaseAll => {
+            for button in held_buttons.drain() {
+                if let Some(button) = parse_button(&button) { let _ = enigo.button(button, Direction::Release); }
+            }
+            for key in held_keys.drain() {
+                if let Some(keycode) = parse_key(&key) { let _ = enigo.key(keycode, Direction::Release); }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // The local health endpoint stays loopback-only. It exposes no remote input.
     let address: SocketAddr = "127.0.0.1:47831".parse()?;
     let app = Router::new()
         .route("/health", get(health))
@@ -492,15 +495,13 @@ async fn main() -> Result<()> {
             response.headers_mut().insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
             response
         }));
-
     let listener = TcpListener::bind(address).await?;
     println!("RemoteDesk Host v{}", env!("CARGO_PKG_VERSION"));
     println!("Health check: http://{address}/health");
-    println!("Security: loopback-only health endpoint; remote mouse and keyboard are disabled.");
-    println!("Press Ctrl+C to stop.");
+    println!("Control transport: outbound WSS via Cloudflare Worker; no inbound Windows port is opened.");
+    println!("Mouse/keyboard are enabled only after you approve the temporary pairing prompt.");
     tokio::spawn(pairing_loop());
-
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+    axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
             tokio::time::sleep(Duration::from_millis(50)).await;

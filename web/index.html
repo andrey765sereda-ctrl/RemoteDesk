@@ -4,71 +4,105 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#111318">
-  <meta name="description" content="RemoteDesk — управление своим Windows-компьютером с iPhone.">
-  <title>RemoteDesk</title>
+  <meta name="description" content="RemoteDesk — защищённое удалённое управление своим Windows-компьютером с iPhone.">
+  <title>RemoteDesk — управление ПК</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
   <main class="app-shell">
     <header class="topbar">
       <div class="brand-mark" aria-hidden="true">RD</div>
-      <div class="brand-copy"><h1>RemoteDesk</h1><p>Удалённый рабочий стол</p></div>
-      <span class="phase-tag">PHASE 4</span>
+      <div class="brand-copy"><h1>RemoteDesk</h1><p>Управление Windows 11 с iPhone</p></div>
+      <span class="phase-tag">CONTROL</span>
     </header>
 
-    <section class="hero card">
-      <div class="eyebrow"><span class="status-dot"></span> УДАЛЁННЫЙ РАБОЧИЙ СТОЛ</div>
-      <h2>Твой компьютер.<br><span>На твоём iPhone.</span></h2>
-      <p class="muted">Сопряжение через Cloudflare и просмотр экрана по WebRTC. На этом этапе передаётся только изображение: мышь и клавиатура отключены.</p>
-      <div class="status-line"><span id="status-indicator" class="status-indicator idle"></span><span id="status-text">Не проверено</span></div>
+    <section class="card hero">
+      <div class="eyebrow"><span class="status-dot"></span> ЗАЩИЩЁННОЕ УПРАВЛЕНИЕ</div>
+      <h2>Твой компьютер.<br><span>Под твоим контролем.</span></h2>
+      <p class="muted">Видео идёт через OBS и MediaMTX. Команды мыши и клавиатуры идут отдельно по аутентифицированному WebSocket через Cloudflare. Входящие порты Windows открывать не нужно.</p>
+      <div class="status-line"><span id="status-indicator" class="status-indicator idle"></span><span id="status-text">API не проверено</span></div>
       <button id="check-button" class="primary-button" type="button">Проверить API</button>
     </section>
 
     <section class="card form-card">
-      <div class="section-heading"><div><p class="eyebrow">ПОДКЛЮЧЕНИЕ</p><h3>Адрес API</h3></div><span class="step-number">01</span></div>
-      <label for="api-url">Cloudflare Worker URL</label>
+      <div class="section-heading"><div><p class="eyebrow">СОЕДИНЕНИЕ</p><h3>Cloudflare Worker</h3></div><span class="step-number">01</span></div>
+      <label for="api-url">Адрес API</label>
       <input id="api-url" type="url" inputmode="url" placeholder="https://remotedesk-api.example.workers.dev" autocomplete="url">
-      <p class="helper">Вставь URL после публикации Worker. Значение сохраняется только в памяти текущей страницы.</p>
       <button id="save-url" class="secondary-button" type="button">Применить адрес</button>
     </section>
 
     <section class="card pairing-card">
-      <div class="section-heading"><div><p class="eyebrow">БЕЗОПАСНОЕ СОПРЯЖЕНИЕ</p><h3>Подключить компьютер</h3></div><span class="step-number">02</span></div>
-      <p class="muted pairing-explainer">Запусти RemoteDesk Host на Windows с адресом своего Cloudflare Worker. Введи временный код, показанный в терминале компьютера. Подключение обязательно нужно подтвердить на самом ПК.</p>
+      <div class="section-heading"><div><p class="eyebrow">СОПРЯЖЕНИЕ</p><h3>Подключить компьютер</h3></div><span class="step-number">02</span></div>
+      <p class="muted">Запусти RemoteDesk Host на Windows. Введи временный код из терминала. Компьютер обязательно попросит подтвердить сопряжение перед включением ввода.</p>
       <label for="pair-code">Временный код с Windows</label>
-      <input id="pair-code" type="text" inputmode="text" autocapitalize="characters" autocomplete="one-time-code" maxlength="14" placeholder="AB12-CD34-EF56" aria-describedby="pair-helper">
-      <p id="pair-helper" class="helper">Код действует 5 минут и может быть использован один раз. Не отправляй его другим людям.</p>
-      <div class="status-line pairing-status-line"><span id="pair-status-indicator" class="status-indicator idle"></span><span id="pair-status-text">Ожидает код</span></div>
+      <input id="pair-code" type="text" inputmode="text" autocapitalize="characters" autocomplete="one-time-code" maxlength="14" placeholder="AB12-CD34-EF56">
+      <p class="helper">Код действует 5 минут и может быть использован один раз. Подтверждай только свой запрос.</p>
+      <div class="status-line"><span id="pair-status-indicator" class="status-indicator idle"></span><span id="pair-status-text">Ожидает код</span></div>
       <button id="pair-button" class="primary-button" type="button">Запросить сопряжение</button>
     </section>
 
-    <section class="card screen-card" id="screen-card">
-      <div class="section-heading"><div><p class="eyebrow">WEBRTC</p><h3>Экран компьютера</h3></div><span class="step-number">03</span></div>
-      <div class="screen-preview" id="screen-preview">
-        <div id="screen-placeholder" class="screen-placeholder">
-          <div class="screen-placeholder-icon">RD</div>
-          <strong>Экран пока не подключён</strong>
-          <span>Введи код сопряжения выше и подтверди запрос на Windows.</span>
+    <section class="card stream-card">
+      <div class="section-heading"><div><p class="eyebrow">ВИДЕО</p><h3>Трансляция OBS / MediaMTX</h3></div><span class="step-number">03</span></div>
+      <label for="stream-url">URL потока MediaMTX</label>
+      <input id="stream-url" type="url" inputmode="url" placeholder="http://192.168.1.20:8889/remotedesk" autocomplete="url">
+      <button id="stream-open" class="secondary-button" type="button">Открыть видео в другой вкладке</button>
+      <p class="helper">Введи тот же адрес, который уже открывается на iPhone. Открой видео в отдельной вкладке Safari, затем вернись на эту вкладку для управления.</p>
+    </section>
+
+    <section class="card control-card" id="control-card" data-ready="false">
+      <div class="section-heading"><div><p class="eyebrow">ВВОД</p><h3>Пульт управления</h3></div><span class="step-number">04</span></div>
+      <div class="status-line"><span id="control-status-indicator" class="status-indicator idle"></span><span id="control-status-text">Сначала выполни сопряжение</span></div>
+      <div id="controls-area" class="controls-area">
+        <p class="control-caption">Сенсорная панель — перемещение курсора. Короткое касание — левый клик.</p>
+        <div id="touchpad" class="touchpad" role="application" aria-label="Сенсорная панель мыши">
+          <div class="touchpad-grid" aria-hidden="true"></div>
+          <div class="touchpad-mark">ПЕРЕМЕЩАЙ КУРСОР</div>
         </div>
-        <video id="screen-frame" autoplay playsinline muted controls hidden aria-label="Поток H.264 с рабочего стола Windows"></video>
+        <div class="mouse-row">
+          <button class="mouse-button" type="button" data-click-button="left">Левый клик</button>
+          <button class="mouse-button" type="button" data-click-button="right">Правый клик</button>
+          <button class="mouse-button" type="button" data-click-button="middle">Колесо</button>
+        </div>
+        <div class="mouse-row scroll-row">
+          <button class="soft-button" type="button" data-wheel="-120">Прокрутка ↑</button>
+          <button class="soft-button" type="button" data-wheel="120">Прокрутка ↓</button>
+          <button class="soft-button" type="button" data-hold-button="left">Удерживать ЛКМ</button>
+        </div>
+        <div class="section-subheading">Клавиши</div>
+        <div class="key-grid">
+          <button class="key-button hold-key" type="button" data-key-hold="Control">Ctrl</button>
+          <button class="key-button hold-key" type="button" data-key-hold="Alt">Alt</button>
+          <button class="key-button hold-key" type="button" data-key-hold="Shift">Shift</button>
+          <button class="key-button hold-key" type="button" data-key-hold="Win">Win</button>
+          <button class="key-button" type="button" data-key-click="Escape">Esc</button>
+          <button class="key-button" type="button" data-key-click="Tab">Tab</button>
+          <button class="key-button" type="button" data-key-click="Backspace">⌫</button>
+          <button class="key-button" type="button" data-key-click="Enter">Enter</button>
+          <button class="key-button" type="button" data-key-click="ArrowLeft">←</button>
+          <button class="key-button" type="button" data-key-click="ArrowUp">↑</button>
+          <button class="key-button" type="button" data-key-click="ArrowDown">↓</button>
+          <button class="key-button" type="button" data-key-click="ArrowRight">→</button>
+          <button class="key-button" type="button" data-key-click="Home">Home</button>
+          <button class="key-button" type="button" data-key-click="End">End</button>
+          <button class="key-button" type="button" data-key-click="PageUp">PgUp</button>
+          <button class="key-button" type="button" data-key-click="PageDown">PgDn</button>
+        </div>
+        <div class="section-subheading">Ввод текста</div>
+        <label for="text-to-type">Текст для компьютера</label>
+        <textarea id="text-to-type" rows="3" maxlength="500" placeholder="Напиши текст — он будет введён на Windows после нажатия кнопки."></textarea>
+        <button id="send-text" class="primary-button" type="button">Ввести текст на ПК</button>
+        <button id="release-inputs" class="soft-button emergency-button" type="button">Отпустить все кнопки и клавиши</button>
       </div>
-      <div class="status-line screen-status-line"><span id="screen-status-indicator" class="status-indicator idle"></span><span id="screen-status-text">Ожидает защищённого соединения</span></div>
-      <button id="disconnect-button" class="secondary-button" type="button" disabled>Отключить просмотр</button>
-      <p class="helper">Видеопоток H.264 передаётся через WebRTC. Кодирование OpenH264 пока программное; мышь и клавиатура отключены.</p>
+      <button id="disconnect-button" class="secondary-button" type="button" disabled>Отключить управление</button>
+      <p class="helper">Подключение ограничено сессией, которую ты подтвердил на Windows. Не запускай Host от имени администратора без необходимости. Закрой управление кнопкой отключения или останови Host через Ctrl+C.</p>
     </section>
 
     <section class="card info-card">
-      <div class="section-heading"><div><p class="eyebrow">СОСТОЯНИЕ ПРОЕКТА</p><h3>Функции</h3></div><span class="step-number">04</span></div>
-      <ul class="feature-list">
-        <li class="done"><span class="feature-icon">✓</span><div><strong>Веб-интерфейс</strong><small>Адаптирован для экрана iPhone</small></div></li>
-        <li class="done"><span class="feature-icon">✓</span><div><strong>API и Windows Host</strong><small>Проверка связи без удалённого управления</small></div></li>
-        <li class="done"><span class="feature-icon">✓</span><div><strong>Временное сопряжение</strong><small>Одноразовый код и подтверждение на ПК</small></div></li>
-        <li class="current"><span class="feature-icon">•</span><div><strong>Предпросмотр экрана</strong><small>H.264-видеопоток через WebRTC</small></div></li>
-        <li><span class="feature-icon">5</span><div><strong>Мышь и клавиатура</strong><small>Будут добавлены после проверки видеопотока</small></div></li>
-      </ul>
+      <div class="section-heading"><div><p class="eyebrow">ПРОТОКОЛ</p><h3>Как передаются команды</h3></div><span class="step-number">05</span></div>
+      <p class="muted small-copy">Видео обслуживает OBS / MediaMTX. Управляющие события идут по WSS через Cloudflare Worker к Windows Host. Worker разрешает только ограниченный набор событий мыши, клавиш и текста; команды запуска произвольных программ не поддерживаются.</p>
     </section>
 
-    <footer><p>RemoteDesk · локальная разработка</p><p class="footer-note">Эта версия передаёт только изображение рабочего стола после подтверждения на Windows. Управляющие команды не реализованы.</p></footer>
+    <footer><p>RemoteDesk · удалённое управление своим ПК</p><p class="footer-note">Проверяй запрос сопряжения на самом Windows-компьютере. Не передавай временный код посторонним.</p></footer>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
   </main>
   <script src="./app.js" defer></script>

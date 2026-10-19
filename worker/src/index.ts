@@ -18,6 +18,14 @@ interface PairingSession {
   clientAnswer?: string;
 }
 
+type ControlRole = "host" | "client";
+interface ControlSocketAttachment {
+  authenticated: boolean;
+  sessionId?: string;
+  role?: ControlRole;
+  expiresAt?: number;
+}
+
 interface RateBucket {
   count: number;
   resetAt: number;
@@ -32,6 +40,58 @@ function isRtcDescription(value: unknown, expectedType: "offer" | "answer"): val
     return description.type === expectedType && typeof description.sdp === "string" && description.sdp.length > 0 && description.sdp.length <= 90_000;
   } catch {
     return false;
+  }
+}
+
+
+const CONTROL_BUTTONS = new Set(["left", "right", "middle"]);
+const CONTROL_KEYS = new Set([
+  "control", "ctrl", "alt", "shift", "meta", "win", "windows", "escape", "esc",
+  "enter", "return", "backspace", "tab", "space", "delete", "home", "end", "pageup",
+  "pagedown", "arrowup", "arrowdown", "arrowleft", "arrowright", "up", "down", "left", "right",
+  "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+]);
+
+function sanitizeControlCommand(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const command = value as Record<string, unknown>;
+  const action = command.action;
+  if (action === "move") {
+    const dx = command.dx;
+    const dy = command.dy;
+    if (typeof dx !== "number" || typeof dy !== "number" || !Number.isFinite(dx) || !Number.isFinite(dy)) return null;
+    if (Math.abs(dx) > 180 || Math.abs(dy) > 180) return null;
+    return { action, dx: Math.round(dx), dy: Math.round(dy) };
+  }
+  if (action === "click" || action === "buttonDown" || action === "buttonUp") {
+    if (typeof command.button !== "string" || !CONTROL_BUTTONS.has(command.button)) return null;
+    return { action, button: command.button };
+  }
+  if (action === "wheel") {
+    if (typeof command.deltaY !== "number" || !Number.isFinite(command.deltaY) || Math.abs(command.deltaY) > 120) return null;
+    return { action, deltaY: Math.trunc(command.deltaY) };
+  }
+  if (action === "key") {
+    if (typeof command.key !== "string" || typeof command.phase !== "string") return null;
+    const key = command.key.toLowerCase();
+    const isAsciiAlphaNumeric = command.key.length === 1 && /^[a-z0-9]$/i.test(command.key);
+    if (!CONTROL_KEYS.has(key) && !isAsciiAlphaNumeric) return null;
+    if (!["down", "up", "click"].includes(command.phase)) return null;
+    return { action, key: command.key, phase: command.phase };
+  }
+  if (action === "text") {
+    if (typeof command.text !== "string" || command.text.length > 500 || command.text.includes("\0")) return null;
+    return { action, text: command.text };
+  }
+  if (action === "releaseAll") return { action };
+  return null;
+}
+
+function safeWebSocketSend(socket: WebSocket, value: unknown): void {
+  try {
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value));
+  } catch {
+    // The peer may have disconnected between readyState and send.
   }
 }
 
@@ -114,11 +174,19 @@ export default {
       return json({
         app: "RemoteDesk API",
         status: "ok",
-        version: "0.3.1",
+        version: "0.4.0",
         environment: env.APP_ENV ?? "unknown",
-        capabilities: ["health-check", "temporary-pairing", "host-approval", "webrtc-screen-preview"],
-        remoteControlEnabled: false,
+        capabilities: ["health-check", "temporary-pairing", "host-approval", "authenticated-control-websocket"],
+        remoteControlEnabled: true,
       }, 200, origin, env);
+    }
+
+    if (url.pathname === "/api/control/socket") {
+      if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+        return json({ error: "websocket_upgrade_required" }, 426, origin, env);
+      }
+      const id = env.PAIRING_DIRECTORY.idFromName("remotedesk-global-pairing-directory");
+      return env.PAIRING_DIRECTORY.get(id).fetch(request);
     }
 
     const supported = new Set([
@@ -175,11 +243,22 @@ export class PairingDirectory {
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {}
 
   async fetch(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname;
+    if (path === "/api/control/socket") {
+      if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+        return this.reply({ error: "websocket_upgrade_required" }, 426);
+      }
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
+      this.state.acceptWebSocket(server);
+      server.serializeAttachment({ authenticated: false } satisfies ControlSocketAttachment);
+      return new Response(null, { status: 101, webSocket: client });
+    }
     if (request.method !== "POST") return this.reply({ error: "method_not_allowed" }, 405);
     const body = await readJson(request);
     if (!body) return this.reply({ error: "invalid_json" }, 400);
 
-    const path = new URL(request.url).pathname;
+
     if (path === "/api/pairing/start") return this.start(body, request);
     if (path === "/api/pairing/claim") return this.claim(body, request);
     if (path === "/api/pairing/host-status") return this.hostStatus(body);
@@ -425,5 +504,127 @@ export class PairingDirectory {
     return this.reply({ ok: true, status: "answer_ready" });
   }
 
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const text = typeof message === "string" ? message : new TextDecoder().decode(message);
+    if (text.length > 4096) {
+      try { ws.close(1009, "message too large"); } catch {}
+      return;
+    }
+    let data: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid message");
+      data = parsed as Record<string, unknown>;
+    } catch {
+      safeWebSocketSend(ws, { type: "error", message: "invalid_json" });
+      return;
+    }
 
+    let attachment = (ws.deserializeAttachment() ?? { authenticated: false }) as ControlSocketAttachment;
+    if (!attachment.authenticated) {
+      const role = data.role;
+      const sessionId = typeof data.sessionId === "string" ? data.sessionId : "";
+      if (data.type !== "auth" || !/^[a-f0-9]{32}$/i.test(sessionId) || (role !== "host" && role !== "client")) {
+        safeWebSocketSend(ws, { type: "error", message: "authentication_required" });
+        try { ws.close(1008, "authentication required"); } catch {}
+        return;
+      }
+
+      let session: PairingSession | null = null;
+      if (role === "host") {
+        const hostSecret = typeof data.hostSecret === "string" ? data.hostSecret : "";
+        session = await this.authorizedHost({ sessionId, hostSecret });
+      } else {
+        const clientToken = typeof data.clientToken === "string" ? data.clientToken : "";
+        session = await this.authorizedClient({ sessionId, clientToken });
+      }
+      if (!session) {
+        safeWebSocketSend(ws, { type: "error", message: "unauthorized_or_session_not_approved" });
+        try { ws.close(1008, "not authorized"); } catch {}
+        return;
+      }
+
+      // One active socket per role/session: a newly authenticated connection replaces the old one.
+      for (const oldSocket of this.state.getWebSockets()) {
+        if (oldSocket === ws) continue;
+        const oldAttachment = oldSocket.deserializeAttachment() as ControlSocketAttachment | null;
+        if (oldAttachment?.authenticated && oldAttachment.sessionId === sessionId && oldAttachment.role === role) {
+          try { oldSocket.close(4001, "replaced by a new connection"); } catch {}
+        }
+      }
+      attachment = { authenticated: true, sessionId, role, expiresAt: session.expiresAt };
+      ws.serializeAttachment(attachment);
+      safeWebSocketSend(ws, { type: "auth_ok", role });
+      const peer = this.findControlPeer(sessionId, role === "host" ? "client" : "host");
+      if (peer) {
+        safeWebSocketSend(ws, { type: role === "host" ? "clientConnected" : "hostConnected" });
+        safeWebSocketSend(peer, { type: role === "host" ? "hostConnected" : "clientConnected" });
+      } else if (role === "client") {
+        safeWebSocketSend(ws, { type: "hostOffline" });
+      }
+      return;
+    }
+
+    const sessionId = attachment.sessionId ?? "";
+    const role = attachment.role;
+    const session = await this.loadSession(sessionId);
+    if (!session || session.status !== "approved" || this.isExpired(session) || (attachment.expiresAt ?? 0) <= Date.now()) {
+      safeWebSocketSend(ws, { type: "error", message: "session_expired" });
+      try { ws.close(1008, "session expired"); } catch {}
+      return;
+    }
+
+    if (data.type === "ping") {
+      safeWebSocketSend(ws, { type: "pong", at: Date.now() });
+      return;
+    }
+
+    if (role === "client" && data.type === "control") {
+      const command = sanitizeControlCommand(data.command);
+      if (!command) {
+        safeWebSocketSend(ws, { type: "ack", id: String(data.id ?? ""), ok: false, message: "invalid_or_disallowed_command" });
+        return;
+      }
+      const host = this.findControlPeer(sessionId, "host");
+      if (!host) {
+        safeWebSocketSend(ws, { type: "ack", id: String(data.id ?? ""), ok: false, message: "host_offline" });
+        return;
+      }
+      safeWebSocketSend(host, { type: "control", id: String(data.id ?? "").slice(0, 80), command });
+      return;
+    }
+
+    if (role === "host" && data.type === "ack") {
+      const client = this.findControlPeer(sessionId, "client");
+      if (client) safeWebSocketSend(client, {
+        type: "ack",
+        id: String(data.id ?? "").slice(0, 80),
+        ok: data.ok === true,
+        message: typeof data.message === "string" ? data.message.slice(0, 200) : "",
+      });
+      return;
+    }
+  }
+
+  webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): void {
+    this.notifyPeerDisconnected(ws);
+  }
+
+  webSocketError(ws: WebSocket, _error: unknown): void {
+    this.notifyPeerDisconnected(ws);
+  }
+
+  private findControlPeer(sessionId: string, role: ControlRole): WebSocket | undefined {
+    return this.state.getWebSockets().find((candidate) => {
+      const attachment = candidate.deserializeAttachment() as ControlSocketAttachment | null;
+      return attachment?.authenticated === true && attachment.sessionId === sessionId && attachment.role === role && candidate.readyState === WebSocket.OPEN;
+    });
+  }
+
+  private notifyPeerDisconnected(ws: WebSocket): void {
+    const attachment = ws.deserializeAttachment() as ControlSocketAttachment | null;
+    if (!attachment?.authenticated || !attachment.sessionId || !attachment.role) return;
+    const peer = this.findControlPeer(attachment.sessionId, attachment.role === "host" ? "client" : "host");
+    if (peer) safeWebSocketSend(peer, { type: attachment.role === "host" ? "hostDisconnected" : "clientDisconnected" });
+  }
 }

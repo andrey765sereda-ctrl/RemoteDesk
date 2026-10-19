@@ -16,6 +16,3 @@ worker/.wrangler/
 .vscode/
 .idea/
 .DS_Store
-
-# Windows debug symbols
-**/*.pdb

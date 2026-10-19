@@ -1,86 +1,58 @@
-# RemoteDesk — Phase 4: H.264 WebRTC screen preview
+# RemoteDesk
 
-RemoteDesk is an experimental Windows 11 + iPhone remote-desktop project built without requiring a Mac. The static iPhone web client is published with GitHub Pages. Cloudflare Workers + a Durable Object coordinate one-time pairing and WebRTC signaling. A Rust Host on Windows captures the desktop and sends an H.264 video track over WebRTC after the user approves the pairing request in the Windows terminal.
+RemoteDesk provides a private, owner-approved control channel from an iPhone browser to a Windows 11 host. The video stream is handled separately by OBS Studio + MediaMTX; the Rust Host in this build handles input commands only.
 
-**Current phase: read-only H.264 screen preview, not a finished remote-desktop product.** Windows uses the OpenH264 software encoder configured for up to 60 FPS at a 1280×720 cap; measured FPS depends on CPU, capture speed, and network. Mouse, keyboard, clipboard and file transfer are disabled. This build intentionally uses STUN only and has no TURN relay or TURN credentials. Direct WebRTC may fail on networks whose NAT/firewall prevents peer-to-peer traffic. Do not expose the Host health endpoint or add router port forwarding.
+## Components
 
-## Project structure
+- `web/`: GitHub Pages control interface; touchpad, mouse buttons, special keys, and text entry.
+- `worker/`: Cloudflare Worker + Durable Object for one-time pairing approval and an authenticated WebSocket relay. The relay carries control messages only, not video.
+- `windows-host/`: Rust Host. It creates a five-minute pairing code, requires local terminal approval, connects outbound to the Worker over WSS, and injects allowed mouse/keyboard input through Enigo.
+- OBS Studio + MediaMTX: independent video path. The control site can open your existing MediaMTX viewer in another Safari tab.
 
-- `web/`: mobile-first GitHub Pages client, pairing UI, WebRTC signaling client and H.264 video rendering.
-- `worker/`: Cloudflare Worker API and `PairingDirectory` Durable Object for pairing, approval and short-lived SDP signaling.
-- `windows-host/`: Rust Host; loopback-only health endpoint, temporary pairing client, screen capture, OpenH264 encoder and WebRTC H.264 media track.
-- `protocol/`: API and signaling protocol notes.
-- `docs/PHASE-4.md`: deployment and testing instructions for H.264 video.
-- `.github/workflows/pages.yml`: publishes `web/` using GitHub Pages.
+## Security properties
 
-## Prerequisites
+- Host input is disabled until a valid pairing request is explicitly approved in the Windows terminal.
+- The Host opens an outbound secure WebSocket; no inbound Windows port is required for control.
+- Worker authenticates Host with the session's host secret and browser with its short-lived client token.
+- Commands are allow-listed: relative pointer movement, mouse buttons, wheel, a limited set of keys, text up to 500 characters, and release-all. There is no shell or arbitrary command execution endpoint.
+- Host releases held buttons/keys when the control channel closes or the browser disconnects.
+- Pairing sessions expire after 30 minutes after approval; restart Host to begin a new session.
+- Run Host as a normal user, not as Administrator, unless you have a specific need. Remote input may interact with the unlocked desktop, so only approve pairing requests you initiated.
 
-- Windows 11
-- Rust stable with Edition 2024 support
-- Node.js and npm (`npm.cmd` / `npx.cmd` are convenient in PowerShell if `npm.ps1` is blocked)
-- Git and GitHub account
-- Cloudflare account with Workers and Durable Objects support
-- iPhone with Safari
+## Update the project
 
-## Deploy web client
+1. Copy the files from this archive into your existing `D:\Projects\RemoteDesk` folder, replacing the matching files. Keep the existing `.git` folder.
+2. Commit and push the changed source files (do not add `target/` or `node_modules/`):
 
-From the root of the repo:
+   ```powershell
+   cd D:\Projects\RemoteDesk
+   git add .gitignore README.md docs protocol web windows-host/Cargo.toml windows-host/src/main.rs worker/package.json worker/src/index.ts
+   git commit -m "Add authenticated remote input controls"
+   git push origin main
+   ```
 
-```powershell
-git status
-git add .
-git commit -m "Add read-only WebRTC screen preview"
-git push origin main
-```
+3. Deploy the Worker:
 
-Wait for the GitHub Actions workflow **Publish RemoteDesk web client** to complete. The Worker signaling API is unchanged for this phase, so a Worker redeploy is not required.
+   ```powershell
+   cd D:\Projects\RemoteDesk\worker
+   npm.cmd install
+   npm.cmd run typecheck
+   npx.cmd wrangler deploy
+   ```
 
-The default Worker URL for this project is:
+4. Wait for GitHub Actions to publish the Pages site.
+5. Start Host:
 
-`https://remotedesk-api.andrey-765-sereda.workers.dev`
+   ```powershell
+   cd D:\Projects\RemoteDesk\windows-host
+   $env:REMOTEDESK_API_URL = "https://remotedesk-api.andrey-765-sereda.workers.dev"
+   cargo run
+   ```
 
-`worker/wrangler.toml` sets `PAGES_ORIGIN` to `https://andrey765sereda-ctrl.github.io`, with no repository path or trailing slash. If the site is published at another origin, update this variable and redeploy.
+6. Enter the Host pairing code on the published website and confirm the request by typing `y` in the Windows terminal. The web UI should report that control is connected. Paste the MediaMTX viewer URL into the video section to open the stream in another browser tab.
 
-## Run the Windows Host
+## Notes
 
-Stop any previous Host process with `Ctrl+C`. Then run:
-
-```powershell
-cd D:\Projects\RemoteDesk\windows-host
-$env:REMOTEDESK_API_URL = "https://remotedesk-api.andrey-765-sereda.workers.dev"
-cargo run
-```
-
-The initial build also compiles the bundled OpenH264 C/C++ source and may take several minutes. A supported Visual Studio C++ toolchain may be required. The Host prints a one-time pairing code. Open the Pages site on the iPhone, enter that code, and approve the request in the Windows terminal. The client then exchanges an SDP offer/answer through Cloudflare and attempts to establish WebRTC directly with the Host. The browser should display a native H.264 video track once ICE/DTLS connects and the first frame is decoded.
-
-## Current API endpoints
-
-- `GET /api/health` — Worker health and capability summary.
-- `POST /api/pairing/start` — Host registers a one-time pairing code.
-- `POST /api/pairing/claim` — browser claims the code and receives an ephemeral token.
-- `POST /api/pairing/host-status` — Host polls the pairing state.
-- `POST /api/pairing/decision` — Host approves or rejects the browser.
-- `POST /api/pairing/client-status` — browser polls the pairing state.
-- `POST /api/rtc/host-offer` — Host-secret-authenticated SDP offer publication.
-- `POST /api/rtc/client-offer` — browser polls for the offer using its ephemeral token.
-- `POST /api/rtc/client-answer` — browser submits its SDP answer.
-- `POST /api/rtc/host-answer` — Host polls for the answer.
-
-See `docs/PHASE-4.md` for build instructions and current limitations.
-
-## Security boundaries
-
-- Pairing codes are one-use and expire after 5 minutes. Upon approval, the signaling session is extended for up to 30 minutes.
-- The Host secret is never sent to the browser; the Worker stores only its SHA-256 hash. The browser token is randomly generated and stored in page memory, not localStorage; the Worker stores only its hash.
-- The Host must explicitly approve the initial pairing request.
-- The Worker passes SDP signaling only and does not relay screen frames. SDP is accepted only on an approved session and size-limited.
-- The Host's local `/health` endpoint is bound to `127.0.0.1:47831` and cannot run commands.
-- This phase sends no remote input. CORS is a browser boundary, not authentication; session secrets and approval are the actual checks.
-- Do not configure router port forwarding. This STUN-only build cannot guarantee connections across every mobile/Wi-Fi network; if direct ICE fails, the session will not connect.
-
-The current code has not been compiled on the target Windows computer from this environment. Run `cargo run` and `npm.cmd run typecheck` locally and report any errors before proceeding to mouse/keyboard input or performance work.
-
-
-## Current screen transport
-
-The current development phase uses a read-only H.264 video track over WebRTC, with OpenH264 software encoding on Windows. Read [docs/PHASE-4.md](docs/PHASE-4.md) for build and test steps. The transport remains STUN-only, and remote input is disabled.
+- The video path assumes you already configured OBS to publish H.264 through MediaMTX. It is independent of this Rust Host and Worker.
+- The control channel relays small WebSocket messages through Cloudflare; video is never sent through Cloudflare Worker.
+- This is a functional early control implementation, not a signed commercial remote-desktop product. Validate it on your own devices and keep the Host pairing approval prompt enabled.
