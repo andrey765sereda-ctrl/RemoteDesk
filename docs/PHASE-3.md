@@ -72,3 +72,11 @@ New-NetFirewallRule -DisplayName "RemoteDesk WebRTC (Private)" -Direction Inboun
 ```
 
 This rule is only for the compiled Host executable on the Private profile. It does not open the local health server to the Internet. Remove the rule later with `Remove-NetFirewallRule -DisplayName "RemoteDesk WebRTC (Private)"` if you no longer use it.
+
+
+## Performance tuning update
+
+The sender targets a 100 ms start-to-start interval (up to 10 FPS) instead of waiting 700 ms after every frame. Actual FPS remains limited by synchronous desktop capture, JPEG encoding, network bandwidth, and reliable ordered DataChannel delivery. The Host prints five-second rolling stats: observed FPS, average JPEG frame size, capture time, and send time. If capture time is consistently high, the next improvement should be a native Windows Graphics Capture pipeline and video encoding rather than simply raising the target FPS.
+
+
+> Superseded by [PHASE-4.md](PHASE-4.md): the current build sends a native H.264 RTP video track instead of JPEG chunks over a DataChannel.

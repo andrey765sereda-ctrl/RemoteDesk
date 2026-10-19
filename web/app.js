@@ -20,11 +20,8 @@
   let toastTimeout;
   let pairingInProgress = false;
   let activePeerConnection = null;
-  let activeDataChannel = null;
-  let latestFrameUrl = null;
   let firstFrameResolver = null;
   let firstFrameRejecter = null;
-  let frameBuffers = new Map();
 
   apiInput.value = DEFAULT_API_URL;
 
@@ -233,16 +230,18 @@
 
   async function startScreenPreview(sessionId, clientToken) {
     disconnectScreen(false);
-    setScreenStatus('waiting', 'Создаём защищённое WebRTC-соединение…');
+    setScreenStatus('waiting', 'Создаём защищённый WebRTC-видеоканал…');
     disconnectButton.disabled = true;
-    // STUN-only direct P2P mode. No TURN relay and no TURN credentials are used.
+
+    // Direct peer-to-peer transport only; deliberately no TURN server is configured.
     const rtcConfiguration = {
       iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }],
       iceTransportPolicy: 'all'
     };
-    setScreenStatus('waiting', 'Режим STUN-only: пытаемся установить прямое WebRTC-соединение без ретранслятора…');
+    setScreenStatus('waiting', 'Режим STUN-only: устанавливаем прямое соединение…');
     const pc = new RTCPeerConnection(rtcConfiguration);
     activePeerConnection = pc;
+
     let firstFrameResolve;
     let firstFrameReject;
     const firstFrame = new Promise((resolve, reject) => {
@@ -251,15 +250,48 @@
     });
     firstFrameResolver = firstFrameResolve;
     firstFrameRejecter = firstFrameReject;
-    // Register a rejection handler immediately in case signaling fails before the first-frame wait begins.
     firstFrame.catch(() => {});
+
+    const markVideoReady = () => {
+      if (screenFrame.videoWidth <= 0 || screenFrame.videoHeight <= 0) return;
+      setScreenStatus('good', `H.264-видеопоток · ${screenFrame.videoWidth}×${screenFrame.videoHeight}`);
+      disconnectButton.disabled = false;
+      if (firstFrameResolver) {
+        const resolve = firstFrameResolver;
+        firstFrameResolver = null;
+        firstFrameRejecter = null;
+        resolve();
+      }
+    };
+
+    screenFrame.autoplay = true;
+    screenFrame.playsInline = true;
+    screenFrame.muted = true;
+    screenFrame.controls = true;
+    screenFrame.onloadeddata = markVideoReady;
+    screenFrame.onplaying = markVideoReady;
+
+    pc.ontrack = event => {
+      if (event.track.kind !== 'video') return;
+      console.info('[RemoteDesk] Remote video track received:', event.track.kind, event.track.id);
+      const stream = event.streams && event.streams[0] ? event.streams[0] : new MediaStream([event.track]);
+      screenFrame.srcObject = stream;
+      screenFrame.hidden = false;
+      screenPlaceholder.hidden = true;
+      screenFrame.play().catch(error => {
+        console.warn('[RemoteDesk] Video autoplay was blocked; use the play control on the video:', error);
+        setScreenStatus('waiting', 'Видеопоток получен. Нажми ▶ на видео, если Safari не начал воспроизведение автоматически.');
+      });
+    };
 
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
       if (state === 'connecting') setScreenStatus('waiting', 'Соединяем устройства…');
-      if (state === 'connected') setScreenStatus('waiting', 'Канал установлен. Ожидаем первый кадр…');
+      if (state === 'connected' && screenFrame.videoWidth === 0) {
+        setScreenStatus('waiting', 'Канал установлен. Ожидаем первый H.264-кадр…');
+      }
       if (state === 'failed') {
-        setScreenStatus('bad', 'WebRTC не подключился. Включён STUN-only режим: проверь кандидаты ICE и сетевые ограничения.');
+        setScreenStatus('bad', 'WebRTC не подключился. STUN-only не использует ретранслятор; проверь ICE и сетевые ограничения.');
         if (firstFrameRejecter) firstFrameRejecter(new Error('WebRTC-соединение завершилось ошибкой'));
       }
       if (state === 'disconnected') setScreenStatus('waiting', 'Связь временно потеряна…');
@@ -269,28 +301,12 @@
       const state = pc.iceConnectionState;
       console.info('[RemoteDesk] ICE state:', state);
       if (state === 'checking') setScreenStatus('waiting', 'Проверяем сетевые маршруты ICE…');
-      if (state === 'connected' || state === 'completed') setScreenStatus('waiting', 'Сетевой ICE-канал установлен. Ожидаем DataChannel…');
+      if (state === 'connected' || state === 'completed') setScreenStatus('waiting', 'Сетевой канал установлен. Ожидаем H.264-видеопоток…');
       if (state === 'disconnected') setScreenStatus('waiting', 'ICE временно отключён. Проверяем восстановление…');
-      if (state === 'failed') setScreenStatus('bad', 'ICE failed: прямой маршрут не найден. TURN отключён; проверь Wi-Fi/мобильную сеть и Windows Firewall.');
+      if (state === 'failed') setScreenStatus('bad', 'ICE failed: прямой маршрут не найден. TURN выключен; проверь сеть и Windows Firewall.');
     };
     pc.onicecandidateerror = event => {
       console.warn('[RemoteDesk] ICE candidate error:', event.errorCode, event.errorText, event.url);
-    };
-    pc.ondatachannel = event => {
-      const channel = event.channel;
-      if (channel.label !== 'screen-frames') {
-        channel.close();
-        return;
-      }
-      activeDataChannel = channel;
-      channel.binaryType = 'arraybuffer';
-      channel.onopen = () => {
-        disconnectButton.disabled = false;
-        setScreenStatus('waiting', 'Получаем изображение рабочего стола…');
-      };
-      channel.onclose = () => setScreenStatus('idle', 'Канал просмотра закрыт');
-      channel.onerror = () => setScreenStatus('bad', 'Ошибка канала изображения');
-      channel.onmessage = event => consumeFrameChunk(event.data);
     };
 
     let stage = 'получение WebRTC-предложения от Windows';
@@ -298,13 +314,36 @@
       console.info('[RemoteDesk] Stage:', stage);
       const offer = await waitForHostOffer(sessionId, clientToken);
       if (!offer || offer.type !== 'offer' || typeof offer.sdp !== 'string' || !offer.sdp.length) {
-        throw new Error('Worker вернул некорректное предложение: ожидался объект {type:"offer", sdp:"…"}');
+        throw new Error('Worker вернул некорректное WebRTC-предложение: ожидался объект {type:"offer", sdp:"…"}');
+      }
+      if (!offer.sdp.toLowerCase().includes('h264')) {
+        throw new Error('Windows Host не предложил кодек H.264. Проверь версию windows-host.');
       }
       console.info('[RemoteDesk] Offer received:', { type: offer.type, sdpLength: offer.sdp.length, candidates: summarizeSdpCandidates(offer.sdp) });
 
       stage = 'применение WebRTC-предложения';
-      setScreenStatus('waiting', 'Применяем WebRTC-предложение…');
+      setScreenStatus('waiting', 'Применяем предложение H.264…');
       await pc.setRemoteDescription(offer);
+
+      stage = 'выбор H.264 для видеопотока';
+      const receiverCapabilities = window.RTCRtpReceiver && RTCRtpReceiver.getCapabilities
+        ? RTCRtpReceiver.getCapabilities('video')
+        : null;
+      const h264Codecs = receiverCapabilities && receiverCapabilities.codecs
+        ? receiverCapabilities.codecs.filter(codec => {
+            const mime = String(codec.mimeType || '').toLowerCase();
+            return mime === 'video/h264';
+          })
+        : [];
+      if (!h264Codecs.some(codec => String(codec.mimeType || '').toLowerCase() === 'video/h264')) {
+        throw new Error('Этот браузер не объявил поддержку H.264 через WebRTC. Открой RemoteDesk в Safari на iPhone.');
+      }
+      const videoTransceiver = pc.getTransceivers().find(transceiver => transceiver.receiver && transceiver.receiver.track.kind === 'video');
+      if (videoTransceiver && typeof videoTransceiver.setCodecPreferences === 'function') {
+        videoTransceiver.setCodecPreferences(h264Codecs);
+      } else {
+        console.warn('[RemoteDesk] setCodecPreferences is not available; browser codec preference will be used.');
+      }
 
       stage = 'создание WebRTC-ответа';
       const answer = await pc.createAnswer();
@@ -322,25 +361,28 @@
       if (!localDescription || localDescription.type !== 'answer' || !localDescription.sdp) {
         throw new Error('Браузер не предоставил локальный SDP-ответ после ICE gathering');
       }
-      console.info('[RemoteDesk] Local answer ready:', { type: localDescription.type, sdpLength: localDescription.sdp.length, candidates: summarizeSdpCandidates(localDescription.sdp) });
+      if (!localDescription.sdp.toLowerCase().includes('h264')) {
+        throw new Error('Ответ Safari не содержит согласованный H.264-кодек.');
+      }
+      console.info('[RemoteDesk] Local H.264 answer ready:', { type: localDescription.type, sdpLength: localDescription.sdp.length, candidates: summarizeSdpCandidates(localDescription.sdp) });
 
       stage = 'отправка WebRTC-ответа через Cloudflare Worker';
-      setScreenStatus('waiting', 'Отправляем WebRTC-ответ на Windows…');
+      setScreenStatus('waiting', 'Отправляем ответ на Windows…');
       await postApi('/api/rtc/client-answer', {
         sessionId,
         clientToken,
         description: JSON.stringify(localDescription),
       });
-      console.info('[RemoteDesk] WebRTC answer published to Worker');
+      console.info('[RemoteDesk] WebRTC H.264 answer published to Worker');
 
-      stage = 'установка DataChannel';
-      setScreenStatus('waiting', 'Ответ отправлен Windows. Устанавливаем канал изображения…');
+      stage = 'ожидание первого H.264-кадра';
+      setScreenStatus('waiting', 'Ответ отправлен. Ожидаем первый H.264-кадр…');
       await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`DataChannel/первый кадр не появился за 45 секунд; connection=${pc.connectionState}, ICE=${pc.iceConnectionState}, dataChannel=${activeDataChannel ? activeDataChannel.readyState : 'not-created'}`)), 45000);
+        const timer = setTimeout(() => reject(new Error(`Первый видеокадр не появился за 60 секунд; connection=${pc.connectionState}, ICE=${pc.iceConnectionState}, video=${screenFrame.videoWidth}x${screenFrame.videoHeight}`)), 60000);
         firstFrame.then(() => { clearTimeout(timer); resolve(); }, error => { clearTimeout(timer); reject(error); });
       });
-      setScreenStatus('good', 'Экран подключён · режим только просмотра');
-      showToast('Изображение Windows получено. Управление вводом пока выключено.');
+      setScreenStatus('good', `Экран подключён · H.264 · ${screenFrame.videoWidth}×${screenFrame.videoHeight} · только просмотр`);
+      showToast('H.264-видео Windows получено. Управление вводом пока выключено.');
     } catch (error) {
       const detail = error && error.message ? error.message : String(error || 'неизвестная ошибка');
       console.error('[RemoteDesk] Preview failed at stage:', stage, error);
@@ -349,57 +391,7 @@
     }
   }
 
-  function consumeFrameChunk(data) {
-    if (!(data instanceof ArrayBuffer) || data.byteLength < 9) return;
-    const packet = new Uint8Array(data);
-    const view = new DataView(data);
-    const frameId = view.getUint32(0, false);
-    const chunkIndex = view.getUint16(4, false);
-    const chunkCount = view.getUint16(6, false);
-    if (chunkCount < 1 || chunkCount > 512 || chunkIndex >= chunkCount) return;
-
-    let frame = frameBuffers.get(frameId);
-    if (!frame) {
-      frame = { count: chunkCount, parts: new Array(chunkCount), received: 0, bytes: 0 };
-      frameBuffers.set(frameId, frame);
-    }
-    if (frame.count !== chunkCount || frame.parts[chunkIndex]) return;
-    const part = packet.slice(8);
-    frame.parts[chunkIndex] = part;
-    frame.received += 1;
-    frame.bytes += part.byteLength;
-
-    while (frameBuffers.size > 3) {
-      const oldestId = frameBuffers.keys().next().value;
-      frameBuffers.delete(oldestId);
-    }
-    if (frame.received !== frame.count) return;
-
-    const jpeg = new Uint8Array(frame.bytes);
-    let offset = 0;
-    for (const chunk of frame.parts) {
-      jpeg.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    frameBuffers.delete(frameId);
-    if (latestFrameUrl) URL.revokeObjectURL(latestFrameUrl);
-    latestFrameUrl = URL.createObjectURL(new Blob([jpeg], { type: 'image/jpeg' }));
-    screenFrame.src = latestFrameUrl;
-    screenFrame.hidden = false;
-    screenPlaceholder.hidden = true;
-    if (firstFrameResolver) {
-      firstFrameResolver();
-      firstFrameResolver = null;
-      firstFrameRejecter = null;
-    }
-  }
-
   function disconnectScreen(showStatus = true) {
-    frameBuffers.clear();
-    if (activeDataChannel) {
-      try { activeDataChannel.close(); } catch { /* already closed */ }
-      activeDataChannel = null;
-    }
     if (activePeerConnection) {
       try { activePeerConnection.close(); } catch { /* already closed */ }
       activePeerConnection = null;
@@ -409,11 +401,10 @@
       firstFrameRejecter(new Error('Предпросмотр отключён'));
       firstFrameRejecter = null;
     }
-    if (latestFrameUrl) {
-      URL.revokeObjectURL(latestFrameUrl);
-      latestFrameUrl = null;
-    }
-    screenFrame.removeAttribute('src');
+    screenFrame.pause();
+    screenFrame.srcObject = null;
+    screenFrame.onloadeddata = null;
+    screenFrame.onplaying = null;
     screenFrame.hidden = true;
     screenPlaceholder.hidden = false;
     disconnectButton.disabled = true;
