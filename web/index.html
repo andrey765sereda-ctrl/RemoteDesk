@@ -13,13 +13,13 @@
     <header class="topbar">
       <div class="brand-mark" aria-hidden="true">RD</div>
       <div class="brand-copy"><h1>RemoteDesk</h1><p>Удалённый рабочий стол</p></div>
-      <span class="phase-tag">PHASE 1</span>
+      <span class="phase-tag">PHASE 2</span>
     </header>
 
     <section class="hero card">
       <div class="eyebrow"><span class="status-dot"></span> ПРОТОТИП ИНФРАСТРУКТУРЫ</div>
       <h2>Твой компьютер.<br><span>На твоём iPhone.</span></h2>
-      <p class="muted">Сейчас проверяем доступность API. Передача экрана и управление мышью появятся на следующих этапах.</p>
+      <p class="muted">Настраиваем безопасное сопряжение. Передача экрана и управление мышью появятся на следующих этапах.</p>
       <div class="status-line"><span id="status-indicator" class="status-indicator idle"></span><span id="status-text">Не проверено</span></div>
       <button id="check-button" class="primary-button" type="button">Проверить API</button>
     </section>
@@ -32,17 +32,27 @@
       <button id="save-url" class="secondary-button" type="button">Применить адрес</button>
     </section>
 
+    <section class="card pairing-card">
+      <div class="section-heading"><div><p class="eyebrow">БЕЗОПАСНОЕ СОПРЯЖЕНИЕ</p><h3>Подключить компьютер</h3></div><span class="step-number">02</span></div>
+      <p class="muted pairing-explainer">Запусти RemoteDesk Host на Windows с адресом своего Cloudflare Worker. Введи временный код, показанный в терминале компьютера. Подключение обязательно нужно подтвердить на самом ПК.</p>
+      <label for="pair-code">Временный код с Windows</label>
+      <input id="pair-code" type="text" inputmode="text" autocapitalize="characters" autocomplete="one-time-code" maxlength="14" placeholder="AB12-CD34-EF56" aria-describedby="pair-helper">
+      <p id="pair-helper" class="helper">Код действует 5 минут и может быть использован один раз. Не отправляй его другим людям.</p>
+      <div class="status-line pairing-status-line"><span id="pair-status-indicator" class="status-indicator idle"></span><span id="pair-status-text">Ожидает код</span></div>
+      <button id="pair-button" class="primary-button" type="button">Запросить сопряжение</button>
+    </section>
+
     <section class="card info-card">
-      <div class="section-heading"><div><p class="eyebrow">СЛЕДУЮЩИЕ ЭТАПЫ</p><h3>Состояние проекта</h3></div><span class="step-number">02</span></div>
+      <div class="section-heading"><div><p class="eyebrow">СОСТОЯНИЕ ПРОЕКТА</p><h3>Функции</h3></div><span class="step-number">03</span></div>
       <ul class="feature-list">
         <li class="done"><span class="feature-icon">✓</span><div><strong>Веб-интерфейс</strong><small>Адаптирован для экрана iPhone</small></div></li>
-        <li class="current"><span class="feature-icon">•</span><div><strong>API и Windows Host</strong><small>Проверка связи без удалённого управления</small></div></li>
-        <li><span class="feature-icon">3</span><div><strong>Безопасное сопряжение</strong><small>Привязка устройств и временные разрешения</small></div></li>
+        <li class="done"><span class="feature-icon">✓</span><div><strong>API и Windows Host</strong><small>Проверка связи без удалённого управления</small></div></li>
+        <li class="current"><span class="feature-icon">•</span><div><strong>Временное сопряжение</strong><small>Одноразовый код и подтверждение на ПК</small></div></li>
         <li><span class="feature-icon">4</span><div><strong>Трансляция экрана</strong><small>WebRTC и аппаратное кодирование</small></div></li>
       </ul>
     </section>
 
-    <footer><p>RemoteDesk · локальная разработка</p><p class="footer-note">Этот прототип не управляет компьютером и не открывает доступ к нему из интернета.</p></footer>
+    <footer><p>RemoteDesk · локальная разработка</p><p class="footer-note">В этой фазе сопряжение не включает передачу экрана или управление компьютером.</p></footer>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
   </main>
   <script src="./app.js" defer></script>

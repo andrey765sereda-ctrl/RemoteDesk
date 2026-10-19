@@ -4,7 +4,14 @@ compatibility_date = "2026-10-19"
 workers_dev = true
 
 [vars]
-APP_ENV = "development"
+APP_ENV = "production"
+# After GitHub Pages is published, set this to the exact origin only, e.g.
+# PAGES_ORIGIN = "https://YOUR_GITHUB_USERNAME.github.io"
 
-# The static Pages origin can be added here after deployment. For local testing,
-# localhost origins are allowed by the Worker code. Do not add secrets to [vars].
+[[durable_objects.bindings]]
+name = "PAIRING_DIRECTORY"
+class_name = "PairingDirectory"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PairingDirectory"]

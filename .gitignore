@@ -1,0 +1,17 @@
+# Rust build artifacts
+windows-host/target/
+
+# Node/Cloudflare build artifacts
+worker/node_modules/
+worker/.wrangler/
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+*.local
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
